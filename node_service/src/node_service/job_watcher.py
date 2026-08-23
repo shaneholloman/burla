@@ -691,6 +691,22 @@ async def reinit_node(assigned_workers: list):
     )
 
 
+async def _cancel_worker_input_tasks(workers: list):
+    # Cancel before any container kill so teardown does not get logged as
+    # "Worker container stopped unexpectedly" on in-flight calls.
+    tasks = []
+    for worker in workers:
+        task = worker.process_inputs_task
+        if task is None:
+            continue
+        worker.retired = True
+        task.cancel()
+        tasks.append(task)
+        worker.process_inputs_task = None
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 async def reset_workers(logger: Logger):
     # Stops idle or reassigned workers from holding creds for a finished job.
     NODE_AUTH_CREDENTIALS_PATH.unlink(missing_ok=True)
@@ -707,6 +723,8 @@ async def reset_workers(logger: Logger):
             except asyncio.CancelledError:
                 pass
             SELF[task_key] = None
+    workers = list(SELF["workers"]) + list(SELF["idle_workers"])
+    await _cancel_worker_input_tasks(workers)
     if SELF["reboot_containers_after_job"]:
         await logger.log(
             "Rebooting worker containers to restore dynamic worker capacity ..."

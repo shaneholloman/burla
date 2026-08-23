@@ -1134,6 +1134,11 @@ class WorkerClient:
                     await self.log_writer.write_error(input_index, error.traceback_str)
                 result = (input_index, True, error.error_info_pkl)
             except (WorkerOutOfMemoryError, WorkerProcessTerminatedError) as error:
+                # Pressure retirement / revoke clears current_input and sets
+                # retired before killing us; that kill must not be logged as a
+                # per-call infrastructure failure (the input was requeued).
+                if self.current_input is None or self.retired:
+                    return
                 if SELF["dynamic_func_ram"]:
                     result = await self._retire_after_dynamic_worker_failure(
                         input_index, input_pkl, error
@@ -1156,6 +1161,13 @@ class WorkerClient:
                     result = (input_index, True, self._serialize_error(error))
                 stop_after_result = True
             except BaseException as error:
+                # Same intentional-teardown signal as above. Without this,
+                # job-end container kills surface as
+                # "Worker container stopped unexpectedly" on every in-flight
+                # call and look like Burla broke when a different call's UDF
+                # actually failed.
+                if self.current_input is None or self.retired:
+                    return
                 if self.log_writer is not None:
                     await self.log_writer.write_error(
                         input_index, self._traceback_string(error)

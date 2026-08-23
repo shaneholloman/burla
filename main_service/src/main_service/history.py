@@ -435,12 +435,29 @@ TASK_SUMMARY_SORT_COLUMNS = {
 # and its first metric sample.
 _RUNNING_TRACE_MAX_AGE_SEC = 15
 
+# Job-end worker teardown used to write these as per-call errors; they are not
+# UDF failures and must not mark a call failed in summaries or error counts.
+_TEARDOWN_ERROR_LOG_FILTER = """
+logs NOT LIKE '%Worker container stopped unexpectedly%'
+AND logs NOT LIKE '%Worker process ended unexpectedly while the container was still healthy%'
+"""
+_REAL_INPUT_ERROR_FILTER = f"is_error = 1 AND {_TEARDOWN_ERROR_LOG_FILTER}"
+
+
+def _is_teardown_infrastructure_log(message: str) -> bool:
+    return (
+        "Worker container stopped unexpectedly" in message
+        or "Worker process ended unexpectedly while the container was still healthy"
+        in message
+    )
+
+
 # One row per call, enumerating every index 0..n_inputs-1 so calls with zero
 # traces still appear. Exact start/duration/attempts come from call_events;
 # jobs that predate events fall back to sample/log-derived values (first
 # trace as start, sample span as duration). Filters/sort/pagination stay in
 # SQL so 100k+ call jobs never ship the whole set to the dashboard.
-_CALLS_BASE_CTE = """
+_CALLS_BASE_CTE = f"""
 WITH RECURSIVE all_calls(input_index) AS (
     SELECT 0 WHERE :n_inputs > 0
     UNION ALL
@@ -457,7 +474,9 @@ events AS (
     GROUP BY input_index
 ),
 logged AS (
-    SELECT input_index, MAX(is_error) AS failed,
+    SELECT input_index,
+        CASE WHEN SUM(CASE
+            WHEN {_REAL_INPUT_ERROR_FILTER} THEN 1 ELSE 0 END) > 0 THEN 1 ELSE 0 END AS failed,
         MIN(timestamp) AS first_logged, MAX(timestamp) AS last_logged
     FROM job_logs
     WHERE job_id = :job_id AND input_index IS NOT NULL
@@ -977,7 +996,7 @@ def job_error_count(job_id: str) -> int:
             _connection()
             .execute(
                 "SELECT COUNT(DISTINCT input_index) FROM job_logs "
-                "WHERE job_id = ? AND is_error = 1 AND input_index IS NOT NULL",
+                f"WHERE job_id = ? AND input_index IS NOT NULL AND {_REAL_INPUT_ERROR_FILTER}",
                 (job_id,),
             )
             .fetchone()
@@ -1025,11 +1044,15 @@ def job_logs_for_input(job_id: str, input_index: int) -> list[dict]:
             timestamp = log.get("timestamp")
             if timestamp is None:
                 continue
+            message = log.get("message", "")
+            is_error = bool(log.get("is_error", False) or doc_is_error)
+            if _is_teardown_infrastructure_log(message):
+                is_error = False
             entries.append(
                 {
-                    "message": log.get("message", ""),
+                    "message": message,
                     "log_timestamp": float(timestamp),
-                    "is_error": bool(log.get("is_error", False) or doc_is_error),
+                    "is_error": is_error,
                 }
             )
     return entries
@@ -1314,7 +1337,7 @@ def management_jobs_page(
         "result_count": "j.n_results",
         "failed_count": (
             "(SELECT COUNT(DISTINCT input_index) FROM job_logs "
-            "WHERE job_id = j.job_id AND input_index IS NOT NULL AND is_error = 1)"
+            f"WHERE job_id = j.job_id AND input_index IS NOT NULL AND {_REAL_INPUT_ERROR_FILTER})"
         ),
     }
     where = []
@@ -1610,14 +1633,18 @@ def management_job_logs(
             timestamp = log.get("timestamp")
             if timestamp is None:
                 continue
+            message = log.get("message", "")
+            is_error = bool(log.get("is_error") or document_is_error)
+            if _is_teardown_infrastructure_log(message):
+                is_error = False
             entries.append(
                 {
                     "row_id": row_id,
                     "offset": offset,
                     "input_index": row_input_index,
                     "timestamp": float(timestamp),
-                    "message": log.get("message", ""),
-                    "is_error": bool(log.get("is_error") or document_is_error),
+                    "message": message,
+                    "is_error": is_error,
                 }
             )
     return entries
@@ -1638,6 +1665,8 @@ def management_error_groups(
         FROM job_logs, json_each(job_logs.logs) AS entry
         WHERE job_id = ? AND input_index IS NOT NULL AND is_error = 1
         AND json_extract(entry.value, '$.timestamp') IS NOT NULL
+        AND json_extract(entry.value, '$.message') NOT LIKE '%Worker container stopped unexpectedly%'
+        AND json_extract(entry.value, '$.message') NOT LIKE '%Worker process ended unexpectedly while the container was still healthy%'
     """
     grouped = f"""
         SELECT management_error_signature(message) AS signature,

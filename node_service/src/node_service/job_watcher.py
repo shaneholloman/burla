@@ -699,7 +699,6 @@ async def _cancel_worker_input_tasks(workers: list):
         task = worker.process_inputs_task
         if task is None:
             continue
-        worker.retired = True
         task.cancel()
         tasks.append(task)
         worker.process_inputs_task = None

@@ -189,7 +189,11 @@ def _workers_slice_memory_used_bytes(worker) -> int:
     """Memory the kernel counts against burla-workers.slice's cap. A slice can
     sit pinned at memory.max, stalling the whole machine in reclaim, while the
     workers' RSS sum reads 65%, so shedding decisions must key off the
-    cgroup's own accounting, never process RSS."""
+    cgroup's own accounting, never process RSS.
+
+    Event-loop callers must call this via asyncio.to_thread: memory.stat
+    reads take a global kernel lock that reclaim storms hold for seconds to
+    minutes, and blocking the loop silences the node's heartbeat."""
     slice_dir = _workers_cgroup_slice_dir(worker)
     if slice_dir is None:
         # Isolation isn't active (logged as an ERROR at boot): physical RAM is
@@ -201,6 +205,19 @@ def _workers_slice_memory_used_bytes(worker) -> int:
 
 def _worker_memory_used_bytes(worker) -> int:
     return _cgroup_memory_used_bytes(_worker_cgroup_dir(worker))
+
+
+def _measure_worker_memory(workers) -> tuple[list, list]:
+    """Same to_thread requirement as _workers_slice_memory_used_bytes."""
+    measured = []
+    gone = []
+    for worker in workers:
+        try:
+            measured.append((_worker_memory_used_bytes(worker), worker))
+        except FileNotFoundError:
+            # /proc/<pid> or the cgroup is gone: died or mid-relaunch.
+            gone.append(worker)
+    return measured, gone
 
 
 async def verify_worker_cgroup_isolation(workers: list, logger: Logger):
@@ -294,18 +311,18 @@ async def dynamic_ram_monitor_loop():
         if worker_memory_limit_bytes is None:
             worker_memory_limit_bytes = _workers_memory_limit_bytes(active_workers[0])
 
-        used_bytes = _workers_slice_memory_used_bytes(active_workers[0])
+        used_bytes = await asyncio.to_thread(
+            _workers_slice_memory_used_bytes, active_workers[0]
+        )
         used_fraction = used_bytes / worker_memory_limit_bytes
         if used_fraction < DYNAMIC_RAM_MAX_WORKER_MEMORY_USED_FRACTION:
             continue
 
-        worker_memory = []
-        for worker in active_workers:
-            try:
-                worker_memory.append((_worker_memory_used_bytes(worker), worker))
-            except FileNotFoundError:
-                # /proc/<pid> or the cgroup is gone: died or mid-relaunch.
-                await _relocate_worker_process_or_retire(worker)
+        worker_memory, gone_workers = await asyncio.to_thread(
+            _measure_worker_memory, active_workers
+        )
+        for worker in gone_workers:
+            await _relocate_worker_process_or_retire(worker)
         if len(worker_memory) <= 1:
             continue
 
@@ -494,7 +511,9 @@ async def dynamic_worker_readd_loop():
         # fallback limit is meaningless).
         if SELF["dynamic_func_ram"] and not IN_LOCAL_DEV_MODE and active_workers:
             memory_limit_bytes = _workers_memory_limit_bytes(active_workers[0])
-            used_bytes = _workers_slice_memory_used_bytes(active_workers[0])
+            used_bytes = await asyncio.to_thread(
+                _workers_slice_memory_used_bytes, active_workers[0]
+            )
             if used_bytes / memory_limit_bytes > READD_MAX_WORKER_MEMORY_USED_FRACTION:
                 continue
 

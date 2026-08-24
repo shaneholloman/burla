@@ -257,7 +257,9 @@ async def _slot_trade_loop(session, logger):
             continue
         if not IN_LOCAL_DEV_MODE and alive_workers:
             memory_limit_bytes = _workers_memory_limit_bytes(alive_workers[0])
-            used_bytes = _workers_slice_memory_used_bytes(alive_workers[0])
+            used_bytes = await asyncio.to_thread(
+                _workers_slice_memory_used_bytes, alive_workers[0]
+            )
             if used_bytes / memory_limit_bytes > READD_MAX_WORKER_MEMORY_USED_FRACTION:
                 continue
 

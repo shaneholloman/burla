@@ -16,7 +16,7 @@ dependencies = [
     "google-auth>=2.42.0",
     "platformdirs>=4.5.0",
     "requests==2.32.4",
-    "tblib>=3.2.0",
+    "tblib>=3.2.2",
     "yaspin>=3.3.0",
     "cryptography>=42.0.0",
     "docker>=7.1.0,<8.0.0",

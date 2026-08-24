@@ -71,7 +71,7 @@ if installed_burla_version != target_burla_version:
     subprocess.run(install_command, check=True)
 
 import cloudpickle
-from tblib import Traceback
+from tblib import Traceback, pickling_support
 
 LOG_START_MARKER_PREFIX = "__burla_input_start__:"
 LOG_END_MARKER_PREFIX = "__burla_input_end__:"
@@ -479,8 +479,9 @@ with socket.create_server(("0.0.0.0", port)) as listener:
                         print(f"{LOG_END_MARKER_PREFIX}{input_index}", flush=True)
                     response_payload = cloudpickle.dumps(return_value)
             except BaseException as e:
+                pickling_support.install(e)
                 tb_dict = Traceback(e.__traceback__).to_dict()
-                error_info = dict(type=type(e), exception=e, traceback_dict=tb_dict)
+                error_info = dict(exception=e, traceback_dict=tb_dict)
                 response_payload = pickle.dumps(
                     {
                         "error_info_pkl": pickle.dumps(error_info),

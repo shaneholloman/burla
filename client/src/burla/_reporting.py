@@ -99,9 +99,15 @@ def log_job_failure_telemetry(
     exception: Exception,
     traceback_str: str,
     chill_exception: bool,
+    diagnostics: list[str],
 ):
     project_id = _get_project_id()
-    telemetry_kwargs = dict(traceback=traceback_str, project_id=project_id, job_id=job_id)
+    telemetry_kwargs = dict(
+        traceback=traceback_str,
+        diagnostics=diagnostics,
+        project_id=project_id,
+        job_id=job_id,
+    )
     if chill_exception:
         message = f"Job {job_id} failed with: {str(exception)}"
         log_telemetry(message, severity="INFO", **telemetry_kwargs)
@@ -254,8 +260,3 @@ class RemoteParallelMapReporter:
         message += '\nPlease wait until the message "Done uploading inputs!" '
         message += "appears before canceling.\n\n-"
         return message
-
-    @classmethod
-    async def log_user_function_error_async(cls, job_id: str, session):
-        message = f"Job {job_id} failed due to user function error."
-        await cls._log_telemetry_async(message, session, project_id=_get_project_id())

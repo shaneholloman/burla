@@ -2,9 +2,9 @@
 Scenario 4: UDF error propagation end-to-end.
 
 A UDF raises `ValueError` on a specific input. The client must receive it
-with `exc.burla_input_index` set, the traceback preserved via `tblib`, a
-Python 3.11+ `__notes__` entry, and a matching error log recorded by the
-head (visible via the jobs HTTP API).
+with `exc.burla_input_index` set and the traceback preserved via `tblib`,
+without Burla diagnostics in the user-visible traceback. A matching error
+log must also be recorded by the head (visible via the jobs HTTP API).
 """
 
 from __future__ import annotations
@@ -38,8 +38,9 @@ def test_udf_error_propagation(
     # Remote traceback must include the user-function frame that actually raised.
     tb = result.get("traceback") or ""
     assert "_inner" in tb, f"traceback does not contain user inner frame:\n{tb}"
-    # Python 3.11+ note attached for visibility.
-    assert "[burla] failed on input index 7" in tb
+    assert "[burla]" not in tb
+    assert "Node diagnostics:" not in tb
+    assert "Job diagnostics:" not in tb
 
     # Head-visible: find the matching job and check the management call/error
     # resources agree that input 7 failed.

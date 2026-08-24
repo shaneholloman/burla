@@ -22,14 +22,19 @@ def test_udf_error_re_raised_on_client(rpm_subprocess, local_dev_cluster):
 def test_udf_error_preserves_traceback(rpm_subprocess, local_dev_cluster):
     source = (
         "def inner(x):\n"
-        "    raise RuntimeError('deep')\n"
+        "    try:\n"
+        "        raise ValueError('root cause')\n"
+        "    except ValueError as error:\n"
+        "        raise RuntimeError('deep') from error\n"
         "def test_function(x):\n"
         "    return inner(x)\n"
     )
-    result = rpm_subprocess(source, [1], timeout_seconds=30)
+    result = rpm_subprocess(source, [1], timeout_seconds=60)
     assert not result["ok"]
     assert result["exception_type"] == "RuntimeError"
     assert "inner" in result["traceback"]
+    assert "ValueError: root cause" in result["traceback"]
+    assert "The above exception was the direct cause" in result["traceback"]
 
 
 def test_burla_exception_re_raised_on_client(rpm_subprocess, local_dev_cluster):
@@ -44,16 +49,18 @@ def test_burla_exception_re_raised_on_client(rpm_subprocess, local_dev_cluster):
     assert result["exception_message"] == "All nodes are busy, please try again later."
 
 
-def test_udf_error_adds_burla_note_py311plus(rpm_subprocess, local_dev_cluster):
+def test_udf_error_hides_burla_diagnostics(rpm_subprocess, local_dev_cluster):
     source = (
         "def test_function(x):\n"
         "    if x == 2:\n"
         "        raise ValueError('bad')\n"
         "    return x\n"
     )
-    result = rpm_subprocess(source, list(range(5)), timeout_seconds=30)
+    result = rpm_subprocess(source, list(range(5)), timeout_seconds=60)
     assert not result["ok"]
-    assert "[burla] failed on input index 2" in result["traceback"]
+    assert "[burla]" not in result["traceback"]
+    assert "Node diagnostics:" not in result["traceback"]
+    assert "Job diagnostics:" not in result["traceback"]
 
 
 def test_old_client_version_refused_with_upgrade_command(

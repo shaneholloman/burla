@@ -11,7 +11,6 @@ from uuid import uuid4
 
 import aiodocker
 import psutil
-from tblib import Traceback
 
 from node_service import (
     SELF,
@@ -1206,14 +1205,6 @@ class WorkerClient:
     def _traceback_string(self, error: Exception):
         if isinstance(error, WorkerFunctionError):
             return error.traceback_str
-        error_info = getattr(error, "burla_error_info", None)
-        if error_info and error_info.get("traceback_dict"):
-            traceback_object = Traceback.from_dict(
-                error_info["traceback_dict"]
-            ).as_traceback()
-            return "".join(
-                traceback.format_exception(type(error), error, traceback_object)
-            )
         return "".join(
             traceback.format_exception(type(error), error, error.__traceback__)
         )

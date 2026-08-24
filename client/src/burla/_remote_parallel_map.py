@@ -242,6 +242,7 @@ async def _execute_job(
     inputs_done_event: Event,
     start_time: float,
     udf_error_event: Event,
+    failure_diagnostics: list[str],
     grow: bool,
     image: Optional[str],
     func_gpu: Optional[FuncGpu],
@@ -505,7 +506,12 @@ async def _execute_job(
                 if node.state == "FAILED":
                     exception = NodeDisconnected(node, await node._failure_message())
                 if exception:
-                    exception.add_note(node._diagnostic_summary())
+                    input_index = getattr(exception, "burla_input_index", None)
+                    if input_index is not None:
+                        failure_diagnostics.append(
+                            f"Failed on input index {input_index}"
+                        )
+                    failure_diagnostics.append(node._diagnostic_summary())
                     lifecycle_exception, lifecycle_error, job_dict = (
                         await _job_lifecycle_exception(client, job_id)
                     )
@@ -513,10 +519,11 @@ async def _execute_job(
                         raise lifecycle_exception
                     job_note = _job_diagnostic_summary(job_dict)
                     if job_note is not None:
-                        exception.add_note(job_note)
+                        failure_diagnostics.append(job_note)
                     if lifecycle_error is not None:
-                        note = f"Also failed to read job lifecycle state: {lifecycle_error!r}"
-                        exception.add_note(note)
+                        failure_diagnostics.append(
+                            f"Also failed to read job lifecycle state: {lifecycle_error!r}"
+                        )
                     raise exception
 
             current_time = time()
@@ -750,6 +757,7 @@ def remote_parallel_map(
     job_id = f"{function_.__name__}-{uid}"
 
     return_queue = Queue()
+    failure_diagnostics = []
     detached_and_canceled = []
 
     if spinner is True and not stdio_supports_spinner():
@@ -788,6 +796,7 @@ def remote_parallel_map(
                     start_time=start_time,
                     generator=generator,
                     udf_error_event=udf_error_event,
+                    failure_diagnostics=failure_diagnostics,
                     grow=grow,
                     image=image,
                     func_gpu=func_gpu,
@@ -821,27 +830,26 @@ def remote_parallel_map(
                 append_fail_reason=f"client exception: {e}",
             )
 
-        # Report errors back to Burla's cloud.
-        if not udf_error_event.is_set():
-            chill_exception = any(
-                [isinstance(e, e_type) for e_type in EXEC_TYPES_TO_NOT_ALERT]
-            )
+        # UDF failures are informational, but their traceback and diagnostics
+        # still belong in telemetry so support can investigate them.
+        chill_exception = udf_error_event.is_set() or any(
+            [isinstance(e, e_type) for e_type in EXEC_TYPES_TO_NOT_ALERT]
+        )
 
-            exc_type, exc_value, exc_traceback = sys.exc_info()
-            tb_details = traceback.format_exception(
-                exc_type, exc_value, exc_traceback
-            )
-            traceback_str = "".join(tb_details)
+        exc_type, exc_value, exc_traceback = sys.exc_info()
+        tb_details = traceback.format_exception(exc_type, exc_value, exc_traceback)
+        traceback_str = "".join(tb_details)
 
-            try:
-                log_job_failure_telemetry(
-                    job_id=job_id,
-                    exception=e,
-                    traceback_str=traceback_str,
-                    chill_exception=chill_exception,
-                )
-            except:
-                pass
+        try:
+            log_job_failure_telemetry(
+                job_id=job_id,
+                exception=e,
+                traceback_str=traceback_str,
+                chill_exception=chill_exception,
+                diagnostics=failure_diagnostics,
+            )
+        except:
+            pass
 
     def _output_generator():
         try:

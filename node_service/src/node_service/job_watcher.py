@@ -8,8 +8,6 @@ import ssl
 from time import time
 from uuid import uuid4
 
-import psutil
-
 from node_service import (
     SELF,
     INSTANCE_NAME,
@@ -29,6 +27,7 @@ from node_service.worker_client import (
     READD_PRESSURE_COOLDOWN_SECONDS,
     _read_cpu_stall_usec,
     _workers_memory_limit_bytes,
+    _workers_slice_memory_used_bytes,
 )
 
 EMPTY_NEIGHBOR_TIMEOUT_SEC = 120
@@ -258,15 +257,7 @@ async def _slot_trade_loop(session, logger):
             continue
         if not IN_LOCAL_DEV_MODE and alive_workers:
             memory_limit_bytes = _workers_memory_limit_bytes(alive_workers[0])
-            used_bytes = 0
-            for worker in alive_workers:
-                try:
-                    used_bytes += worker.memory_rss_bytes()
-                except psutil.NoSuchProcess:
-                    used_bytes = None  # worker mid-relaunch; skip this tick
-                    break
-            if used_bytes is None:
-                continue
+            used_bytes = _workers_slice_memory_used_bytes(alive_workers[0])
             if used_bytes / memory_limit_bytes > READD_MAX_WORKER_MEMORY_USED_FRACTION:
                 continue
 

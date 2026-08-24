@@ -45,7 +45,7 @@ OOM_KILL_MARKER_PREFIX = "__burla_oom_kill__:"
 # where that env dir lives behind Docker Desktop and an extra layer of NAT, this legitimately
 # takes minutes.
 WORKER_BOOT_TIMEOUT_SECONDS = 180
-DYNAMIC_RAM_MAX_WORKER_MEMORY_USED_FRACTION = 0.97
+DYNAMIC_RAM_MAX_WORKER_MEMORY_USED_FRACTION = 0.95
 DYNAMIC_RAM_TARGET_WORKER_MEMORY_USED_FRACTION = 0.92
 DYNAMIC_RAM_MONITOR_INTERVAL_SECONDS = 0.25
 DYNAMIC_RAM_STARTUP_MONITOR_INTERVAL_SECONDS = 0.05
@@ -171,6 +171,38 @@ def _workers_memory_limit_bytes(worker) -> int:
     return int(memory_max)
 
 
+def _cgroup_memory_used_bytes(cgroup_dir: Path) -> int:
+    # memory.current minus inactive file cache: the memory the kernel cannot
+    # trivially reclaim (the same formula resource_metrics reports). Raw
+    # memory.current pins at memory.max under file-heavy workloads even when
+    # healthy, and worker RSS sums badly undercount page cache and kernel
+    # memory, which are charged to the cgroups too.
+    memory_stat = dict(
+        line.split()
+        for line in (cgroup_dir / "memory.stat").read_text().splitlines()
+    )
+    current_bytes = int((cgroup_dir / "memory.current").read_text())
+    return current_bytes - int(memory_stat["inactive_file"])
+
+
+def _workers_slice_memory_used_bytes(worker) -> int:
+    """Memory the kernel counts against burla-workers.slice's cap. A slice can
+    sit pinned at memory.max, stalling the whole machine in reclaim, while the
+    workers' RSS sum reads 65%, so shedding decisions must key off the
+    cgroup's own accounting, never process RSS."""
+    slice_dir = _workers_cgroup_slice_dir(worker)
+    if slice_dir is None:
+        # Isolation isn't active (logged as an ERROR at boot): physical RAM is
+        # the only ceiling left, matching _workers_memory_limit_bytes.
+        memory = psutil.virtual_memory()
+        return memory.total - memory.available
+    return _cgroup_memory_used_bytes(slice_dir)
+
+
+def _worker_memory_used_bytes(worker) -> int:
+    return _cgroup_memory_used_bytes(_worker_cgroup_dir(worker))
+
+
 async def verify_worker_cgroup_isolation(workers: list, logger: Logger):
     """The VM startup script (see main_service/node.py) puts node_service and
     the workers in systemd slices so user load can never starve node_service.
@@ -262,48 +294,45 @@ async def dynamic_ram_monitor_loop():
         if worker_memory_limit_bytes is None:
             worker_memory_limit_bytes = _workers_memory_limit_bytes(active_workers[0])
 
+        used_bytes = _workers_slice_memory_used_bytes(active_workers[0])
+        used_fraction = used_bytes / worker_memory_limit_bytes
+        if used_fraction < DYNAMIC_RAM_MAX_WORKER_MEMORY_USED_FRACTION:
+            continue
+
         worker_memory = []
         for worker in active_workers:
             try:
-                worker_memory.append((worker.memory_rss_bytes(), worker))
-            except psutil.NoSuchProcess:
+                worker_memory.append((_worker_memory_used_bytes(worker), worker))
+            except FileNotFoundError:
+                # /proc/<pid> or the cgroup is gone: died or mid-relaunch.
                 await _relocate_worker_process_or_retire(worker)
-        if not worker_memory:
-            continue
-
-        active_worker_memory_bytes = sum(rss_bytes for rss_bytes, _ in worker_memory)
-        active_worker_memory_fraction = (
-            active_worker_memory_bytes / worker_memory_limit_bytes
-        )
-        if active_worker_memory_fraction < DYNAMIC_RAM_MAX_WORKER_MEMORY_USED_FRACTION:
-            continue
-
         if len(worker_memory) <= 1:
             continue
 
         target_used_bytes = int(
             worker_memory_limit_bytes * DYNAMIC_RAM_TARGET_WORKER_MEMORY_USED_FRACTION
         )
-        bytes_to_free = max(0, active_worker_memory_bytes - target_used_bytes)
-        running_worker_memory = [
-            (rss_bytes, worker)
-            for rss_bytes, worker in worker_memory
-            if not worker.is_idle and worker.current_input is not None
+        bytes_to_free = used_bytes - target_used_bytes
+        # Smallest usage first: each kill abandons the least in-flight
+        # progress, and the loop simply kills as many cheap workers as the
+        # target requires.
+        candidate_worker_memory = [
+            (worker_used_bytes, worker)
+            for worker_used_bytes, worker in worker_memory
+            if worker.current_input is not None
         ]
-        if not running_worker_memory:
+        candidate_worker_memory.sort(key=lambda item: item[0])
+        if not candidate_worker_memory:
             continue
-        # Smallest first: retiring small workers gives large tasks more room
-        # while losing the least in-flight progress to the requeue.
-        running_worker_memory.sort(key=lambda item: item[0])
 
         selected_worker_memory = []
-        selected_rss_bytes = 0
-        for rss_bytes, worker in running_worker_memory:
+        selected_used_bytes = 0
+        for worker_used_bytes, worker in candidate_worker_memory:
             if len(worker_memory) - len(selected_worker_memory) <= 1:
                 break
-            selected_worker_memory.append((rss_bytes, worker))
-            selected_rss_bytes += rss_bytes
-            if selected_rss_bytes >= bytes_to_free:
+            selected_worker_memory.append((worker_used_bytes, worker))
+            selected_used_bytes += worker_used_bytes
+            if selected_used_bytes >= bytes_to_free:
                 break
 
         await retire_workers_for_pressure(
@@ -460,21 +489,13 @@ async def dynamic_worker_readd_loop():
             continue
         if SELF["inputs_queue"].qsize() == 0:
             continue  # no queued work for another worker to pull
-        # RAM headroom check mirrors the RAM monitor's gating (its psutil
-        # numbers are meaningless inside a local-dev fake VM).
+        # RAM headroom check mirrors the RAM monitor's gating (skipped in
+        # local-dev, where the fake VM shares the host's docker VM so the
+        # fallback limit is meaningless).
         if SELF["dynamic_func_ram"] and not IN_LOCAL_DEV_MODE and active_workers:
             memory_limit_bytes = _workers_memory_limit_bytes(active_workers[0])
-            used_bytes = 0
-            for worker in active_workers:
-                try:
-                    used_bytes += worker.memory_rss_bytes()
-                except psutil.NoSuchProcess:
-                    used_bytes = None  # worker mid-relaunch; skip this tick
-                    break
-            memory_fraction_used = (
-                used_bytes / memory_limit_bytes if used_bytes is not None else 1.0
-            )
-            if memory_fraction_used > READD_MAX_WORKER_MEMORY_USED_FRACTION:
+            used_bytes = _workers_slice_memory_used_bytes(active_workers[0])
+            if used_bytes / memory_limit_bytes > READD_MAX_WORKER_MEMORY_USED_FRACTION:
                 continue
 
         await _boot_readded_worker()
@@ -899,9 +920,6 @@ class WorkerClient:
             if "worker_server.py" in cmd:
                 return int(row[1])
         raise RuntimeError(f"worker_server.py not found in {self.container_name}")
-
-    def memory_rss_bytes(self) -> int:
-        return psutil.Process(self.worker_host_pid).memory_info().rss
 
     def cpu_percent(self) -> float:
         # psutil measures CPU use since the previous call on the same handle

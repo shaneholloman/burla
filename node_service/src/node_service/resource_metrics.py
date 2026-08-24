@@ -256,6 +256,56 @@ def _task_sample(
     }
 
 
+def _take_samples(
+    gpu_handles: list,
+    previous_node_counters: dict,
+    previous_node_at: float,
+    previous_worker_counters: dict,
+) -> tuple[list, dict, float, dict]:
+    sampled_at = time()
+    sampled_monotonic = monotonic()
+    current_node_counters = _node_counters()
+    gpu_readings = _gpu_readings(gpu_handles)
+    job_id = SELF["current_job"]
+    samples = [
+        _node_sample(
+            current_node_counters,
+            previous_node_counters,
+            sampled_at,
+            sampled_monotonic - previous_node_at,
+            job_id,
+            gpu_readings,
+        )
+    ]
+
+    snapshots = [
+        _worker_snapshot(worker, job_id)
+        for worker in SELF["workers"]
+        if worker.container_id is not None and worker.worker_host_pid is not None
+    ]
+    worker_sampled_at = monotonic()
+    new_worker_counters = {}
+    for snapshot in snapshots:
+        if snapshot is None:
+            continue
+        container_id = snapshot["container_id"]
+        previous = previous_worker_counters.get(container_id)
+        if previous is not None and snapshot["input_index"] is not None:
+            previous_at, previous_counters = previous
+            samples.append(
+                _task_sample(
+                    snapshot,
+                    previous_counters,
+                    sampled_at,
+                    worker_sampled_at - previous_at,
+                    current_node_counters["memory_total_bytes"],
+                    gpu_readings,
+                )
+            )
+        new_worker_counters[container_id] = (worker_sampled_at, snapshot["counters"])
+    return samples, current_node_counters, sampled_monotonic, new_worker_counters
+
+
 async def resource_metrics_loop():
     gpu_handles = _gpu_handles()
     previous_node_counters = _node_counters()
@@ -269,57 +319,25 @@ async def resource_metrics_loop():
         next_sample_at += SAMPLE_INTERVAL_SEC
         await asyncio.sleep(max(0, next_sample_at - monotonic()))
 
-        sampled_at = time()
-        sampled_monotonic = monotonic()
-        current_node_counters = _node_counters()
-        gpu_readings = _gpu_readings(gpu_handles)
-        pending_samples.append(
-            _node_sample(
-                current_node_counters,
-                previous_node_counters,
-                sampled_at,
-                sampled_monotonic - previous_node_at,
-                SELF["current_job"],
-                gpu_readings,
-            )
+        # In a thread: the per-worker cgroup stat reads take a global kernel
+        # lock that memory-reclaim storms hold for seconds to minutes, and one
+        # ~300-read pass on the event loop once froze it for 159s, silencing
+        # the state push until the head reaped a live node (burla-node-
+        # f494fc7d). A slow read must only ever delay samples, never anything
+        # else.
+        (
+            new_samples,
+            previous_node_counters,
+            previous_node_at,
+            previous_worker_counters,
+        ) = await asyncio.to_thread(
+            _take_samples,
+            gpu_handles,
+            previous_node_counters,
+            previous_node_at,
+            previous_worker_counters,
         )
-        previous_node_counters = current_node_counters
-        previous_node_at = sampled_monotonic
-
-        job_id = SELF["current_job"]
-        snapshots = [
-            _worker_snapshot(worker, job_id)
-            for worker in SELF["workers"]
-            if worker.container_id is not None and worker.worker_host_pid is not None
-        ]
-        worker_sampled_at = monotonic()
-        current_container_ids = set()
-        for snapshot in snapshots:
-            if snapshot is None:
-                continue
-            container_id = snapshot["container_id"]
-            current_container_ids.add(container_id)
-            previous = previous_worker_counters.get(container_id)
-            if previous is not None and snapshot["input_index"] is not None:
-                previous_at, previous_counters = previous
-                pending_samples.append(
-                    _task_sample(
-                        snapshot,
-                        previous_counters,
-                        sampled_at,
-                        worker_sampled_at - previous_at,
-                        current_node_counters["memory_total_bytes"],
-                        gpu_readings,
-                    )
-                )
-            previous_worker_counters[container_id] = (
-                worker_sampled_at,
-                snapshot["counters"],
-            )
-        previous_worker_counters = {
-            container_id: previous_worker_counters[container_id]
-            for container_id in current_container_ids
-        }
+        pending_samples.extend(new_samples)
 
         should_flush = (
             monotonic() - last_flush_at >= BATCH_INTERVAL_SEC

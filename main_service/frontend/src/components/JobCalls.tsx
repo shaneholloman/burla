@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, ChevronDown, ChevronLeft, ChevronRight } from "lucide-react";
+import {
+    ArrowDown,
+    ArrowUp,
+    ChevronDown,
+    ChevronLeft,
+    ChevronRight,
+    ExternalLink,
+    HelpCircle,
+} from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -214,6 +222,75 @@ const SortableHead = ({
     </TableHead>
 );
 
+// Small click-popover explaining throttling, linked from the Throttled fact.
+// Self-contained (no popover primitive in ui/): closes on outside click or
+// Escape.
+const WhyThrottled = () => {
+    const [isOpen, setIsOpen] = useState(false);
+    const containerRef = useRef<HTMLDivElement>(null);
+
+    useEffect(() => {
+        if (!isOpen) return;
+        const onMouseDown = (event: MouseEvent) => {
+            if (!containerRef.current?.contains(event.target as Node)) setIsOpen(false);
+        };
+        const onKeyDown = (event: KeyboardEvent) => {
+            if (event.key === "Escape") setIsOpen(false);
+        };
+        document.addEventListener("mousedown", onMouseDown);
+        document.addEventListener("keydown", onKeyDown);
+        return () => {
+            document.removeEventListener("mousedown", onMouseDown);
+            document.removeEventListener("keydown", onKeyDown);
+        };
+    }, [isOpen]);
+
+    return (
+        <div className="relative" ref={containerRef}>
+            <button
+                type="button"
+                onClick={() => setIsOpen((open) => !open)}
+                aria-expanded={isOpen}
+                className="mt-1 inline-flex items-center gap-1 text-[12px] text-muted-foreground transition-colors duration-150 hover:text-foreground focus-visible:outline-none"
+            >
+                <HelpCircle className="h-3 w-3" />
+                Why was this throttled?
+            </button>
+            {isOpen && (
+                <div className="absolute left-0 top-full z-20 mt-1.5 w-80 rounded-lg border border-border bg-popover p-4 text-left shadow-md">
+                    <div className="eyebrow">About throttling</div>
+                    <p className="mt-2 text-[12.5px] leading-relaxed text-muted-foreground">
+                        This job ran with dynamic CPU/RAM (the default), which
+                        oversubscribes each node so jobs finish sooner. When a node
+                        runs low on CPU or memory, it briefly pauses some workers
+                        mid-call instead of failing them; the hatched amber spans
+                        show exactly when this call was paused. Paused workers
+                        resume automatically as pressure drops, or their input is
+                        moved to another node.
+                    </p>
+                    <p className="mt-2 text-[12.5px] leading-relaxed text-muted-foreground">
+                        To keep a job's calls from ever being throttled, request
+                        fixed resources, e.g.{" "}
+                        <code className="rounded bg-muted px-1 py-0.5 font-mono text-[11.5px] text-foreground">
+                            func_cpu=2
+                        </code>
+                        .
+                    </p>
+                    <a
+                        href="https://burla.dev/docs/api-reference"
+                        target="_blank"
+                        rel="noreferrer"
+                        className="mt-3 inline-flex items-center gap-1 text-[12px] font-medium text-foreground transition-colors duration-150 hover:text-muted-foreground"
+                    >
+                        View docs
+                        <ExternalLink className="h-3 w-3" />
+                    </a>
+                </div>
+            )}
+        </div>
+    );
+};
+
 const CallDetail = ({
     jobId,
     taskIndex,
@@ -305,14 +382,17 @@ const CallDetail = ({
                         {
                             label: "Throttled",
                             value: (
-                                <span className="inline-flex items-baseline gap-1.5">
-                                    {formatDuration(throttledSec)}
-                                    {throttledShare != null && (
-                                        <span className="text-muted-foreground">
-                                            · {throttledShare}% of runtime
-                                        </span>
-                                    )}
-                                </span>
+                                <>
+                                    <span className="inline-flex items-baseline gap-1.5">
+                                        {formatDuration(throttledSec)}
+                                        {throttledShare != null && (
+                                            <span className="text-muted-foreground">
+                                                · {throttledShare}% of runtime
+                                            </span>
+                                        )}
+                                    </span>
+                                    <WhyThrottled />
+                                </>
                             ),
                         },
                     ]

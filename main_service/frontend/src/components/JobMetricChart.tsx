@@ -192,9 +192,10 @@ export const MetricChart = ({
                         cursor={{ stroke: "hsl(var(--border))" }}
                         content={({ active, payload, label }) => {
                             if (!active || !payload?.length) return null;
-                            const throttledFraction = Number(
-                                payload[0].payload?.throttled ?? 0
-                            );
+                            // Binary from the user's perspective: the worker
+                            // either was or wasn't parked during this window.
+                            const isThrottled =
+                                Number(payload[0].payload?.throttled ?? 0) >= 0.05;
                             return (
                                 <div className="rounded-lg border border-border bg-popover px-3 py-2 shadow-md">
                                     <div className="text-xs font-medium text-muted-foreground">
@@ -224,14 +225,11 @@ export const MetricChart = ({
                                             </span>
                                         </div>
                                     ))}
-                                    {throttledFraction > 0 && (
-                                        <div className="mt-0.5 flex items-center gap-2 text-sm tabular-nums text-foreground">
+                                    {isThrottled && (
+                                        <div className="mt-0.5 flex items-center gap-2 text-sm text-foreground">
                                             <ThrottleSwatch />
-                                            <span className="text-xs text-muted-foreground">
+                                            <span className="text-xs font-medium">
                                                 Throttled
-                                            </span>
-                                            <span className="font-medium">
-                                                {Math.round(throttledFraction * 100)}%
                                             </span>
                                         </div>
                                     )}

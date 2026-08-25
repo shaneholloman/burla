@@ -41,6 +41,12 @@ sample.
 - Task rows are attributed to `WorkerClient.current_input` at sample time.
   Inputs that begin and end between sampling instants do not produce a task
   row.
+- `throttled` is 1 on task rows sampled while the node's pressure monitors had
+  the worker throttled to the minimum CPU quota (CPU or memory pressure), else
+  0. `memory_throttled` is 1 only for memory-pressure throttling, where the
+  worker's RAM is also moved to swap. Node rows leave both NULL. The dashboard
+  shades `throttled` spans on the per-call CPU chart and `memory_throttled`
+  spans on the memory chart.
 
 The unique `(instance_name, timestamp, scope, worker_id)` index makes retried
 batches idempotent. The `(job_id, scope, input_index, timestamp)` index supports

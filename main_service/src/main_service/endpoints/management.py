@@ -1004,6 +1004,8 @@ def _call_metrics_dto(series: dict) -> dict:
             "network_tx_bytes_per_second": point["net_tx"],
             "disk_read_bytes_per_second": point["disk_read"],
             "disk_write_bytes_per_second": point["disk_write"],
+            "throttled_fraction": point["throttled"],
+            "memory_throttled_fraction": point["mem_throttled"],
         }
         if series["has_gpu"]:
             item["gpu_percent"] = point["gpu"]
@@ -1015,6 +1017,7 @@ def _call_metrics_dto(series: dict) -> dict:
         "previous_input_index": series["prev_index"],
         "next_input_index": series["next_index"],
         "attempt_count": series["n_attempts"],
+        "throttled_seconds": series["throttled_sec"],
         "points": points,
     }
 
@@ -1044,6 +1047,11 @@ def _raw_metrics_response(
                 row.pop("gpu_percent")
                 row.pop("gpu_memory_bytes")
                 row.pop("gpu_memory_percent")
+            # Node-scope rows and rows from pre-throttling nodes have no value.
+            if row["throttled"] is None:
+                row.pop("throttled")
+            if row["memory_throttled"] is None:
+                row.pop("memory_throttled")
             next_cursor = _encode_cursor(
                 resource, query, [timestamp, row["id"]]
             )

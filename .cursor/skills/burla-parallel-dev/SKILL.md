@@ -49,12 +49,18 @@ Development happens in AWS. GCP is production-only.
 
 ## Running a cluster
 
-From the task's worktree, in its own terminal:
+From the task's worktree:
 
 ```bash
-make local-dev      # whole cluster local, containers on this machine
+make dev-up         # whole cluster local, detached; stays up until dev-down
 make remote-dev     # head local, nodes are real EC2 in the test account
 ```
+
+`make dev-up` launches `make local-dev` in its own OS session (log:
+`_local_dev_state/head.log`), so the cluster survives agent-session cleanup
+and stays up between check-ins. Never start a cluster as a plain foreground
+or backgrounded agent shell: those processes are killed when the agent's
+terminals are reaped, taking the dashboard down behind the user's back.
 
 Then point clients and tests at that cluster. `make test`, `make test-service`,
 and `make test-e2e` already default to this worktree's head port; for ad hoc
@@ -69,9 +75,14 @@ Do not rely on a previous shell export or automatic cluster resolution. Either
 can silently send the job to the deployed test cluster instead of this
 worktree's cluster.
 
-Stop the foreground `make local-dev` or `make remote-dev` process in its
-terminal; the cluster cleans up its own nodes. `make stop-all` is emergency
-machine-wide cleanup and destroys every local dev cluster.
+Stop a local cluster with `make dev-down` (remote-dev stops in its own
+terminal); the cluster cleans up its own nodes. The head's job history
+(`_local_dev_state`) is kept across restarts on purpose: after `dev-down &&
+dev-up` every past job's dashboard page still works, and nodes or jobs that
+died with the old head are retired by the head's reapers a few minutes after
+startup. Run `make dev-clean` (cluster down) when a genuinely fresh state is
+wanted. `make stop-all` is emergency machine-wide cleanup and destroys every
+local dev cluster.
 
 ## The one thing remote-dev cannot see
 

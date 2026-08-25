@@ -114,6 +114,8 @@ def _node_sample(
         "job_id": job_id,
         "input_index": None,
         "worker_id": "",
+        "throttled": None,
+        "memory_throttled": None,
         "cpu_seconds": cpu_seconds,
         "cpu_percent": 100 * cpu_seconds / total_cpu_seconds,
         "memory_bytes": current["memory_bytes"],
@@ -197,6 +199,8 @@ def _worker_snapshot(worker, job_id: str | None):
         "job_id": job_id,
         "input_index": input_index,
         "gpu_index": worker.gpu_index,
+        "throttled": worker.throttled,
+        "memory_throttled": worker.swap_parked,
         "counters": counters,
     }
 
@@ -224,6 +228,8 @@ def _task_sample(
         "job_id": snapshot["job_id"],
         "input_index": snapshot["input_index"],
         "worker_id": snapshot["worker_id"],
+        "throttled": 1 if snapshot["throttled"] else 0,
+        "memory_throttled": 1 if snapshot["memory_throttled"] else 0,
         "cpu_seconds": cpu_seconds,
         "cpu_percent": (
             100 * cpu_seconds / (duration_sec * INSTANCE_N_CPUS)

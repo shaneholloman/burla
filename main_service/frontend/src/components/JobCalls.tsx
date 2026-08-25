@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, ChevronDown, ChevronLeft, ChevronRight } from "lucide-react";
+import {
+    ArrowDown,
+    ArrowUp,
+    ChevronDown,
+    ChevronLeft,
+    ChevronRight,
+    ExternalLink,
+    HelpCircle,
+} from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -19,6 +27,7 @@ import {
     formatBytes,
     formatDuration,
     formatRate,
+    type ThrottleBand,
 } from "@/components/JobMetricChart";
 import { cn } from "@/lib/utils";
 import { managementJson } from "@/lib/managementApi";
@@ -33,6 +42,8 @@ type TaskPoint = {
     disk_write: number;
     gpu: number | null;
     gpu_mem: number | null;
+    throttled: number;
+    mem_throttled: number;
 };
 
 type TaskSeries = {
@@ -41,6 +52,7 @@ type TaskSeries = {
     prev_index: number | null;
     next_index: number | null;
     n_attempts: number;
+    throttled_sec: number;
     bucket_sec: number;
     points: TaskPoint[];
 };
@@ -119,6 +131,7 @@ const mapSeries = (payload: any): TaskSeries => ({
     prev_index: payload.previous_input_index,
     next_index: payload.next_input_index,
     n_attempts: payload.attempt_count,
+    throttled_sec: payload.throttled_seconds,
     bucket_sec: payload.bucket_seconds,
     points: payload.points.map((point) => ({
         t: Date.parse(point.timestamp) / 1000,
@@ -130,8 +143,52 @@ const mapSeries = (payload: any): TaskSeries => ({
         disk_write: point.disk_write_bytes_per_second,
         gpu: point.gpu_percent ?? null,
         gpu_mem: point.gpu_memory_bytes ?? null,
+        throttled: point.throttled_fraction,
+        mem_throttled: point.memory_throttled_fraction,
     })),
 });
+
+// Merge bucket-level throttled fractions into contiguous shaded spans. A
+// bucket counts as throttled above a 5% floor (ignores hairline flapping);
+// spans break where sampling gaps exceed one bucket. Each point covers
+// [t, t + bucket_sec), so spans extend one bucket past their last point.
+// `key` picks which fraction to band: "throttled" (any throttle, CPU chart)
+// or "mem_throttled" (memory-pressure throttle only, memory chart).
+const computeThrottleBands = (
+    series: TaskSeries,
+    key: "throttled" | "mem_throttled"
+): ThrottleBand[] => {
+    const bucket = series.bucket_sec || 1;
+    const bands: ThrottleBand[] = [];
+    let from: number | null = null;
+    let lastT = 0;
+    let fractionSum = 0;
+    let count = 0;
+    const close = () => {
+        if (from != null) {
+            bands.push({ from, to: lastT + bucket, intensity: fractionSum / count });
+            from = null;
+        }
+    };
+    for (const point of series.points) {
+        const isThrottled = point[key] >= 0.05;
+        if (isThrottled && from != null && point.t - lastT > bucket * 1.5) close();
+        if (isThrottled) {
+            if (from == null) {
+                from = point.t;
+                fractionSum = 0;
+                count = 0;
+            }
+            fractionSum += point[key];
+            count += 1;
+            lastT = point.t;
+        } else {
+            close();
+        }
+    }
+    close();
+    return bands;
+};
 
 const iconBtnClass = (disabled: boolean) =>
     disabled
@@ -171,6 +228,77 @@ const SortableHead = ({
         </button>
     </TableHead>
 );
+
+// Small click-popover explaining throttling, linked from the Throttled fact.
+// Self-contained (no popover primitive in ui/): closes on outside click or
+// Escape.
+const WhyThrottled = () => {
+    const [isOpen, setIsOpen] = useState(false);
+    const containerRef = useRef<HTMLDivElement>(null);
+
+    useEffect(() => {
+        if (!isOpen) return;
+        const onMouseDown = (event: MouseEvent) => {
+            if (!containerRef.current?.contains(event.target as Node)) setIsOpen(false);
+        };
+        const onKeyDown = (event: KeyboardEvent) => {
+            if (event.key === "Escape") setIsOpen(false);
+        };
+        document.addEventListener("mousedown", onMouseDown);
+        document.addEventListener("keydown", onKeyDown);
+        return () => {
+            document.removeEventListener("mousedown", onMouseDown);
+            document.removeEventListener("keydown", onKeyDown);
+        };
+    }, [isOpen]);
+
+    return (
+        <div className="relative" ref={containerRef}>
+            <button
+                type="button"
+                onClick={() => setIsOpen((open) => !open)}
+                aria-expanded={isOpen}
+                className="mt-1 inline-flex items-center gap-1 text-[12px] text-muted-foreground transition-colors duration-150 hover:text-foreground focus-visible:outline-none"
+            >
+                <HelpCircle className="h-3 w-3" />
+                Why was this throttled?
+            </button>
+            {isOpen && (
+                <div className="absolute left-0 top-full z-20 mt-1.5 w-[28rem] rounded-lg border border-border bg-popover px-4 py-3 text-left shadow-md">
+                    <div className="eyebrow">About throttling</div>
+                    <p className="mt-2 text-[12.5px] leading-relaxed text-muted-foreground">
+                        This job ran with dynamic CPU/RAM (the default), which
+                        oversubscribes each node so jobs finish sooner. When a node
+                        runs low on CPU or memory, it briefly throttles some
+                        workers mid-call instead of failing them; the hatched amber
+                        spans show exactly when this call was throttled. A
+                        throttled worker gets almost no CPU (and under memory
+                        pressure its RAM is moved to swap), then returns to full
+                        speed as pressure drops, or its input is moved to another
+                        node.
+                    </p>
+                    <p className="mt-2 text-[12.5px] leading-relaxed text-muted-foreground">
+                        To keep a job's calls from ever being throttled, request
+                        fixed resources, e.g.{" "}
+                        <code className="rounded bg-muted px-1 py-0.5 font-mono text-[11.5px] text-foreground">
+                            func_cpu=2
+                        </code>
+                        .
+                    </p>
+                    <a
+                        href="https://burla.dev/docs/api-reference"
+                        target="_blank"
+                        rel="noreferrer"
+                        className="mt-3 inline-flex items-center gap-1 text-[12px] font-medium text-foreground transition-colors duration-150 hover:text-muted-foreground"
+                    >
+                        View docs
+                        <ExternalLink className="h-3 w-3" />
+                    </a>
+                </div>
+            )}
+        </div>
+    );
+};
 
 const CallDetail = ({
     jobId,
@@ -235,6 +363,21 @@ const CallDetail = ({
 
     const taskData = useMemo(() => series?.points ?? [], [series]);
     const taskStartAt = taskData.length ? taskData[0].t : 0;
+    const throttleBands = useMemo(
+        () => (series ? computeThrottleBands(series, "throttled") : []),
+        [series]
+    );
+    // Memory is only affected (moved to swap) under memory-pressure
+    // throttling, so its chart only shades those spans.
+    const memoryThrottleBands = useMemo(
+        () => (series ? computeThrottleBands(series, "mem_throttled") : []),
+        [series]
+    );
+    const throttledSec = series?.throttled_sec ?? 0;
+    const throttledShare =
+        summary?.duration_sec != null && summary.duration_sec > 0
+            ? Math.min(100, Math.round((100 * throttledSec) / summary.duration_sec))
+            : null;
 
     const facts: { label: string; value: React.ReactNode }[] = summary
         ? [
@@ -247,6 +390,28 @@ const CallDetail = ({
                           <span className="text-muted-foreground">No samples</span>
                       ),
               },
+              // Only surfaces when the node's pressure controls actually
+              // throttled this call's worker: the common case stays four facts.
+              ...(throttledSec > 0
+                  ? [
+                        {
+                            label: "Throttled",
+                            value: (
+                                <>
+                                    <span className="inline-flex items-baseline gap-1.5">
+                                        {formatDuration(throttledSec)}
+                                        {throttledShare != null && (
+                                            <span className="text-muted-foreground">
+                                                · {throttledShare}% of runtime
+                                            </span>
+                                        )}
+                                    </span>
+                                    <WhyThrottled />
+                                </>
+                            ),
+                        },
+                    ]
+                  : []),
               {
                   label: "Attempts",
                   value:
@@ -395,6 +560,7 @@ const CallDetail = ({
                                         startAt={taskStartAt}
                                         format={(v) => v.toFixed(2)}
                                         compact
+                                        throttleBands={throttleBands}
                                     />
                                     <MetricChart
                                         title="Memory"
@@ -403,7 +569,12 @@ const CallDetail = ({
                                         startAt={taskStartAt}
                                         format={formatBytes}
                                         compact
+                                        throttleBands={memoryThrottleBands}
                                     />
+                                    {/* No throttle shading on network/disk/GPU:
+                                        throttling only acts on CPU (quota) and
+                                        memory (swap); shading the others would
+                                        imply caps that don't exist. */}
                                     <MetricChart
                                         title="Network I/O"
                                         data={taskData}

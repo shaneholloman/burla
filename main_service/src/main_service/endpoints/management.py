@@ -884,6 +884,7 @@ def _call_metrics_dto(series: dict) -> dict:
             "disk_read_bytes_per_second": point["disk_read"],
             "disk_write_bytes_per_second": point["disk_write"],
             "throttled_fraction": point["throttled"],
+            "memory_throttled_fraction": point["mem_throttled"],
         }
         if series["has_gpu"]:
             item["gpu_percent"] = point["gpu"]
@@ -928,6 +929,8 @@ def _raw_metrics_response(
             # Node-scope rows and rows from pre-throttling nodes have no value.
             if row["throttled"] is None:
                 row.pop("throttled")
+            if row["memory_throttled"] is None:
+                row.pop("memory_throttled")
             next_cursor = _encode_cursor(
                 resource, query, [timestamp, row["id"]]
             )

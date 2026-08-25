@@ -43,6 +43,7 @@ type TaskPoint = {
     gpu: number | null;
     gpu_mem: number | null;
     throttled: number;
+    mem_throttled: number;
 };
 
 type TaskSeries = {
@@ -143,6 +144,7 @@ const mapSeries = (payload: any): TaskSeries => ({
         gpu: point.gpu_percent ?? null,
         gpu_mem: point.gpu_memory_bytes ?? null,
         throttled: point.throttled_fraction,
+        mem_throttled: point.memory_throttled_fraction,
     })),
 });
 
@@ -150,7 +152,12 @@ const mapSeries = (payload: any): TaskSeries => ({
 // bucket counts as throttled above a 5% floor (ignores hairline flapping);
 // spans break where sampling gaps exceed one bucket. Each point covers
 // [t, t + bucket_sec), so spans extend one bucket past their last point.
-const computeThrottleBands = (series: TaskSeries): ThrottleBand[] => {
+// `key` picks which fraction to band: "throttled" (any throttle, CPU chart)
+// or "mem_throttled" (memory-pressure throttle only, memory chart).
+const computeThrottleBands = (
+    series: TaskSeries,
+    key: "throttled" | "mem_throttled"
+): ThrottleBand[] => {
     const bucket = series.bucket_sec || 1;
     const bands: ThrottleBand[] = [];
     let from: number | null = null;
@@ -164,7 +171,7 @@ const computeThrottleBands = (series: TaskSeries): ThrottleBand[] => {
         }
     };
     for (const point of series.points) {
-        const isThrottled = point.throttled >= 0.05;
+        const isThrottled = point[key] >= 0.05;
         if (isThrottled && from != null && point.t - lastT > bucket * 1.5) close();
         if (isThrottled) {
             if (from == null) {
@@ -172,7 +179,7 @@ const computeThrottleBands = (series: TaskSeries): ThrottleBand[] => {
                 fractionSum = 0;
                 count = 0;
             }
-            fractionSum += point.throttled;
+            fractionSum += point[key];
             count += 1;
             lastT = point.t;
         } else {
@@ -357,7 +364,13 @@ const CallDetail = ({
     const taskData = useMemo(() => series?.points ?? [], [series]);
     const taskStartAt = taskData.length ? taskData[0].t : 0;
     const throttleBands = useMemo(
-        () => (series ? computeThrottleBands(series) : []),
+        () => (series ? computeThrottleBands(series, "throttled") : []),
+        [series]
+    );
+    // Memory is only affected (moved to swap) under memory-pressure
+    // throttling, so its chart only shades those spans.
+    const memoryThrottleBands = useMemo(
+        () => (series ? computeThrottleBands(series, "mem_throttled") : []),
         [series]
     );
     const throttledSec = series?.throttled_sec ?? 0;
@@ -556,7 +569,7 @@ const CallDetail = ({
                                         startAt={taskStartAt}
                                         format={formatBytes}
                                         compact
-                                        throttleBands={throttleBands}
+                                        throttleBands={memoryThrottleBands}
                                     />
                                     {/* No throttle shading on network/disk/GPU:
                                         throttling only acts on CPU (quota) and

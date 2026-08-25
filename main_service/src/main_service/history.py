@@ -92,12 +92,15 @@ CREATE TABLE IF NOT EXISTS resource_metrics (
     gpu_percent REAL,
     gpu_memory_bytes INTEGER,
     gpu_memory_percent REAL,
-    -- 1 while the sampled worker was throttled by the node's pressure
-    -- monitors, NULL on node-scope rows. Last on purpose: matches
-    -- where the ALTER migration puts it on pre-existing databases, so
+    -- throttled: 1 while the sampled worker was throttled by the node's
+    -- pressure monitors (CPU or memory pressure). memory_throttled: 1 only
+    -- for memory-pressure throttling, where the worker's RAM is also moved
+    -- to swap. Both NULL on node-scope rows. Last on purpose: matches where
+    -- the ALTER migration puts them on pre-existing databases, so
     -- import_snapshot's schema equality check passes between any two
     -- databases on this version.
-    throttled INTEGER
+    throttled INTEGER,
+    memory_throttled INTEGER
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_resource_metrics_sample
 ON resource_metrics(instance_name, timestamp, scope, worker_id);
@@ -184,6 +187,7 @@ def _connection() -> sqlite3.Connection:
             ("gpu_memory_bytes", "INTEGER"),
             ("gpu_memory_percent", "REAL"),
             ("throttled", "INTEGER"),
+            ("memory_throttled", "INTEGER"),
         ):
             if column not in existing:
                 _conn.execute(f"ALTER TABLE resource_metrics ADD COLUMN {column} {column_type}")
@@ -219,6 +223,7 @@ def add_resource_metrics(instance_name: str, samples: list[dict]):
             sample["gpu_memory_bytes"],
             sample["gpu_memory_percent"],
             sample["throttled"],
+            sample["memory_throttled"],
         )
         for sample in samples
     ]
@@ -229,8 +234,9 @@ def add_resource_metrics(instance_name: str, samples: list[dict]):
             "(timestamp, duration_sec, instance_name, scope, job_id, input_index, "
             "worker_id, cpu_seconds, cpu_percent, memory_bytes, memory_percent, "
             "network_rx_bytes, network_tx_bytes, disk_read_bytes, disk_write_bytes, "
-            "gpu_percent, gpu_memory_bytes, gpu_memory_percent, throttled) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "gpu_percent, gpu_memory_bytes, gpu_memory_percent, throttled, "
+            "memory_throttled) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
         conn.commit()
@@ -395,6 +401,8 @@ def task_metrics_series(job_id: str, input_index: int) -> dict:
             "SUM(MAX(disk_write_bytes, 0)) / SUM(duration_sec), "
             "AVG(gpu_percent), AVG(gpu_memory_bytes), COUNT(gpu_percent), "
             "SUM(CASE WHEN throttled = 1 THEN duration_sec ELSE 0 END) "
+            "/ SUM(duration_sec), "
+            "SUM(CASE WHEN memory_throttled = 1 THEN duration_sec ELSE 0 END) "
             "/ SUM(duration_sec) "
             "FROM resource_metrics "
             "WHERE job_id = ? AND scope = 'task' AND input_index = ? "
@@ -403,7 +411,10 @@ def task_metrics_series(job_id: str, input_index: int) -> dict:
         ).fetchall()
     points = []
     has_gpu = False
-    for bucket, cpus, mem, rx, tx, read, write, gpu, gpu_mem, n_gpu, throttled in rows:
+    for (
+        bucket, cpus, mem, rx, tx, read, write,
+        gpu, gpu_mem, n_gpu, throttled, mem_throttled,
+    ) in rows:
         if n_gpu:
             has_gpu = True
         points.append(
@@ -418,6 +429,7 @@ def task_metrics_series(job_id: str, input_index: int) -> dict:
                 "gpu": round(gpu, 2) if gpu is not None else None,
                 "gpu_mem": round(gpu_mem) if gpu_mem is not None else None,
                 "throttled": round(throttled, 3),
+                "mem_throttled": round(mem_throttled, 3),
             }
         )
     return {
@@ -1299,12 +1311,13 @@ def import_snapshot(
                 "(timestamp, duration_sec, instance_name, scope, job_id, input_index, "
                 "worker_id, cpu_seconds, cpu_percent, memory_bytes, memory_percent, "
                 "network_rx_bytes, network_tx_bytes, disk_read_bytes, disk_write_bytes, "
-                "gpu_percent, gpu_memory_bytes, gpu_memory_percent, throttled) "
+                "gpu_percent, gpu_memory_bytes, gpu_memory_percent, throttled, "
+                "memory_throttled) "
                 "SELECT timestamp, duration_sec, instance_name, scope, job_id, "
                 "input_index, worker_id, cpu_seconds, cpu_percent, memory_bytes, "
                 "memory_percent, network_rx_bytes, network_tx_bytes, disk_read_bytes, "
                 "disk_write_bytes, gpu_percent, gpu_memory_bytes, gpu_memory_percent, "
-                "throttled "
+                "throttled, memory_throttled "
                 "FROM snapshot.resource_metrics "
                 "WHERE job_id IN (SELECT job_id FROM jobs) "
                 "OR (scope = 'node' AND instance_name IN (SELECT instance_name FROM nodes))"
@@ -1752,7 +1765,8 @@ def management_raw_metrics(
                 "SELECT id, timestamp, duration_sec, instance_name, scope, input_index, "
                 "worker_id, cpu_seconds, cpu_percent, memory_bytes, memory_percent, "
                 "network_rx_bytes, network_tx_bytes, disk_read_bytes, disk_write_bytes, "
-                "gpu_percent, gpu_memory_bytes, gpu_memory_percent, throttled "
+                "gpu_percent, gpu_memory_bytes, gpu_memory_percent, throttled, "
+                "memory_throttled "
                 f"FROM resource_metrics WHERE {where} ORDER BY timestamp, id LIMIT ?",
                 params,
             )
@@ -1778,5 +1792,6 @@ def management_raw_metrics(
         "gpu_memory_bytes",
         "gpu_memory_percent",
         "throttled",
+        "memory_throttled",
     )
     return [dict(zip(fields, row)) for row in rows]

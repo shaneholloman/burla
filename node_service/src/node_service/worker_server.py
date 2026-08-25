@@ -17,6 +17,7 @@ import time
 import traceback
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from uuid import uuid4
 
 FUNCTION_PAYLOAD_MAGIC = b"BURLA_FUNCTION_V2\0"
 
@@ -70,7 +71,7 @@ if installed_burla_version != target_burla_version:
     subprocess.run(install_command, check=True)
 
 import cloudpickle
-from tblib import Traceback
+from tblib import Traceback, pickling_support
 
 LOG_START_MARKER_PREFIX = "__burla_input_start__:"
 LOG_END_MARKER_PREFIX = "__burla_input_end__:"
@@ -408,7 +409,7 @@ def load_function_payload(payload):
     )
     digest = hashlib.sha256(module_sources).hexdigest()
     module_path = f"/worker_service_storage/local-modules-{digest}.zip"
-    temporary_path = f"{module_path}.{os.getpid()}"
+    temporary_path = f"{module_path}.{uuid4().hex}"
     with open(temporary_path, "wb") as output:
         output.write(module_sources)
     os.replace(temporary_path, module_path)
@@ -478,8 +479,9 @@ with socket.create_server(("0.0.0.0", port)) as listener:
                         print(f"{LOG_END_MARKER_PREFIX}{input_index}", flush=True)
                     response_payload = cloudpickle.dumps(return_value)
             except BaseException as e:
+                pickling_support.install(e)
                 tb_dict = Traceback(e.__traceback__).to_dict()
-                error_info = dict(type=type(e), exception=e, traceback_dict=tb_dict)
+                error_info = dict(exception=e, traceback_dict=tb_dict)
                 response_payload = pickle.dumps(
                     {
                         "error_info_pkl": pickle.dumps(error_info),

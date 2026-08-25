@@ -12,7 +12,6 @@ from uuid import uuid4
 
 import aiodocker
 import psutil
-from tblib import Traceback
 
 from node_service import (
     SELF,
@@ -76,6 +75,15 @@ READD_MONITOR_INTERVAL_SECONDS = 5
 READD_PRESSURE_COOLDOWN_SECONDS = 30
 READD_MAX_CPU_STALL_FRACTION = 0.05
 READD_MAX_WORKER_MEMORY_USED_FRACTION = 0.75
+
+# Capacity recovery is also blocked while the disk or the NIC is already the
+# bottleneck: IO-bound work looks like low CPU + low RAM, which would
+# otherwise invite over-packing. Neither has a park/kill-side monitor, so an
+# overload caused by adding or unparking a worker would never self-correct;
+# these gates are the only control.
+IO_PRESSURE_FILE = Path("/sys/fs/cgroup/io.pressure")
+READD_MAX_IO_STALL_FRACTION = 0.05
+READD_MAX_NETWORK_UTILIZATION_FRACTION = 0.6
 
 # Memory parking: under memory pressure workers are parked (CPU throttle +
 # resident memory reclaimed into swap via their cgroup's memory.reclaim)
@@ -618,6 +626,79 @@ class WorkerStallTracker:
         return max_fraction
 
 
+def _read_stall_usec(pressure_file: Path) -> int:
+    # `some` line, `total` field: cumulative microseconds during which at
+    # least one task sat waiting for the resource.
+    some_line = pressure_file.read_text().splitlines()[0]
+    return int(some_line.rsplit("total=", 1)[1])
+
+
+def _primary_nic() -> tuple[str | None, float | None]:
+    """Default-route interface name and its link capacity in bytes/sec.
+    Capacity is None when the driver reports no real speed (virtio and veth
+    report -1 or refuse the read), which disables the network add-gate."""
+    nic_name = None
+    for line in Path("/proc/net/route").read_text().splitlines()[1:]:
+        fields = line.split()
+        if fields[1] == "00000000":  # destination 0.0.0.0 = default route
+            nic_name = fields[0]
+            break
+    if nic_name is None:
+        return None, None
+    try:
+        speed_mbps = int(Path(f"/sys/class/net/{nic_name}/speed").read_text())
+    except OSError:
+        return nic_name, None
+    if speed_mbps <= 0:
+        return nic_name, None
+    return nic_name, speed_mbps * 1_000_000 / 8
+
+
+def _read_nic_bytes(nic_name: str) -> int:
+    counters = psutil.net_io_counters(pernic=True, nowrap=True)[nic_name]
+    return counters.bytes_recv + counters.bytes_sent
+
+
+class AddGateSampler:
+    """One instance per recovery/trade loop: tracks the counters behind the
+    disk-IO and network "don't add workers" signals and returns each signal's
+    level over the window since the previous sample() call. Unlike CPU stall
+    (per-worker, see WorkerStallTracker) these are node-wide: workers carry
+    no io or network quotas, so the root io.pressure file and the primary NIC
+    measure exactly the load the job puts on the machine. Unmeasurable
+    signals read 0.0 (no PSI file, no default route, or no reported link
+    speed)."""
+
+    def __init__(self):
+        self._can_check_io = IO_PRESSURE_FILE.exists()
+        self._nic_name, self._nic_capacity_bytes_per_sec = _primary_nic()
+        self._last_io_stall_usec = (
+            _read_stall_usec(IO_PRESSURE_FILE) if self._can_check_io else 0
+        )
+        self._last_nic_bytes = (
+            _read_nic_bytes(self._nic_name) if self._nic_capacity_bytes_per_sec else 0
+        )
+        self._last_read_at = time.perf_counter()
+
+    def sample(self) -> tuple[float, float]:
+        read_at = time.perf_counter()
+        elapsed_sec = read_at - self._last_read_at
+        io_stall = network_utilization = 0.0
+        if self._can_check_io:
+            stall_usec = _read_stall_usec(IO_PRESSURE_FILE)
+            io_stall = (stall_usec - self._last_io_stall_usec) / (
+                elapsed_sec * 1_000_000
+            )
+            self._last_io_stall_usec = stall_usec
+        if self._nic_capacity_bytes_per_sec:
+            nic_bytes = _read_nic_bytes(self._nic_name)
+            bytes_per_sec = (nic_bytes - self._last_nic_bytes) / elapsed_sec
+            network_utilization = bytes_per_sec / self._nic_capacity_bytes_per_sec
+            self._last_nic_bytes = nic_bytes
+        self._last_read_at = read_at
+        return io_stall, network_utilization
+
+
 async def cpu_pressure_monitor_loop():
     if not CPU_PRESSURE_FILE.exists():
         await Logger().log(
@@ -810,6 +891,7 @@ async def dynamic_worker_readd_loop():
     ratchet."""
     can_check_cpu = CPU_PRESSURE_FILE.exists()
     stall_tracker = WorkerStallTracker()
+    gate_sampler = AddGateSampler()
     while SELF["dynamic_func_ram"] or SELF["dynamic_func_cpu"]:
         await asyncio.sleep(READD_MONITOR_INTERVAL_SECONDS)
 
@@ -819,11 +901,19 @@ async def dynamic_worker_readd_loop():
                 worker for worker in _active_dynamic_workers() if not worker.throttled
             ]
             stall_fraction = stall_tracker.max_stall_fraction(unthrottled_workers)
+        io_stall, network_utilization = gate_sampler.sample()
 
         pressure_gone_for = time.time() - SELF["last_pressure_retirement_at"]
         if pressure_gone_for < READD_PRESSURE_COOLDOWN_SECONDS:
             continue
         if stall_fraction > READD_MAX_CPU_STALL_FRACTION:
+            continue
+        # These also gate the unthrottle below: unlike CPU, nothing re-parks
+        # a worker if resuming it swamps the disk or NIC, so prevention is
+        # the only control.
+        if io_stall > READD_MAX_IO_STALL_FRACTION:
+            continue
+        if network_utilization > READD_MAX_NETWORK_UTILIZATION_FRACTION:
             continue
 
         # No queue gate for unthrottling: a parked worker owns its own input
@@ -1575,14 +1665,6 @@ class WorkerClient:
     def _traceback_string(self, error: Exception):
         if isinstance(error, WorkerFunctionError):
             return error.traceback_str
-        error_info = getattr(error, "burla_error_info", None)
-        if error_info and error_info.get("traceback_dict"):
-            traceback_object = Traceback.from_dict(
-                error_info["traceback_dict"]
-            ).as_traceback()
-            return "".join(
-                traceback.format_exception(type(error), error, traceback_object)
-            )
         return "".join(
             traceback.format_exception(type(error), error, error.__traceback__)
         )
@@ -1879,6 +1961,11 @@ class WorkerClient:
                     await self.log_writer.write_error(input_index, error.traceback_str)
                 result = (input_index, True, error.error_info_pkl)
             except (WorkerOutOfMemoryError, WorkerProcessTerminatedError) as error:
+                # Pressure retirement / revoke clears current_input and sets
+                # retired before killing us; that kill must not be logged as a
+                # per-call infrastructure failure (the input was requeued).
+                if self.current_input is None or self.retired:
+                    return
                 if SELF["dynamic_func_ram"]:
                     result = await self._retire_after_dynamic_worker_failure(
                         input_index, input_pkl, error
@@ -1901,6 +1988,13 @@ class WorkerClient:
                     result = (input_index, True, self._serialize_error(error))
                 stop_after_result = True
             except BaseException as error:
+                # Same intentional-teardown signal as above. Without this,
+                # job-end container kills surface as
+                # "Worker container stopped unexpectedly" on every in-flight
+                # call and look like Burla broke when a different call's UDF
+                # actually failed.
+                if self.current_input is None or self.retired:
+                    return
                 if self.log_writer is not None:
                     await self.log_writer.write_error(
                         input_index, self._traceback_string(error)

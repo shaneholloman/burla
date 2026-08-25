@@ -461,7 +461,7 @@ wheels = [
 
 [[package]]
 name = "burla"
-version = "1.7.7"
+version = "1.7.8"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
@@ -551,7 +551,7 @@ requires-dist = [
     { name = "pytz", specifier = ">=2024.1" },
     { name = "requests", specifier = "==2.32.4" },
     { name = "starlette", specifier = ">=0.35.1" },
-    { name = "tblib", specifier = ">=3.2.0" },
+    { name = "tblib", specifier = ">=3.2.2" },
     { name = "uvicorn", specifier = ">=0.25.0" },
     { name = "watchfiles", specifier = ">=1.0.4,<2.0.0" },
     { name = "yaspin", specifier = ">=3.3.0" },
@@ -4819,11 +4819,11 @@ wheels = [
 
 [[package]]
 name = "tblib"
-version = "3.2.0"
+version = "3.2.2"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/03/cd/5106c337877e54f5ab4d3403ab6c1f71769010a60c90068e68e2eb26d5d7/tblib-3.2.0.tar.gz", hash = "sha256:62ae1b8808cfd7c1c15b871d4022abb46188c49d21ace87a02a88707dc7aa1b1", size = 33384, upload-time = "2025-10-21T08:22:29.01Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/f4/8a/14c15ae154895cc131174f858c707790d416c444fc69f93918adfd8c4c0b/tblib-3.2.2.tar.gz", hash = "sha256:e9a652692d91bf4f743d4a15bc174c0b76afc750fe8c7b6d195cc1c1d6d2ccec", size = 35046, upload-time = "2025-11-12T12:21:16.572Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/1a/a8/bba67d26de15cd8969b70cb2cc559418594ade4cbe4a66655dae9cd8a99f/tblib-3.2.0-py3-none-any.whl", hash = "sha256:32c4d3c36ac59c59e8c442d94e7b274b3ce80263ca3201686476ee7616f3579a", size = 12544, upload-time = "2025-10-21T08:22:27.762Z" },
+    { url = "https://files.pythonhosted.org/packages/02/be/5d2d47b1fb58943194fb59dcf222f7c4e35122ec0ffe8c36e18b5d728f0b/tblib-3.2.2-py3-none-any.whl", hash = "sha256:26bdccf339bcce6a88b2b5432c988b266ebbe63a4e593f6b578b1d2e723d2b76", size = 12893, upload-time = "2025-11-12T12:21:14.407Z" },
 ]
 
 [[package]]

@@ -16,7 +16,7 @@ from yaspin import Spinner
 from burla import get_cluster_dashboard_url
 from burla._auth import get_auth_headers
 from burla._cluster_client import ClusterClient, _local_host_from
-from burla._reporting import RemoteParallelMapReporter, safe_print, safe_spinner_write
+from burla._reporting import safe_print, safe_spinner_write
 
 NODE_SILENCE_TIMEOUT_SECONDS = 2 * 60
 RESULT_POLL_SILENCE_TIMEOUT_SECONDS = 3 * 60
@@ -769,17 +769,11 @@ class Node:
                         error_info["traceback_dict"]
                     ).as_traceback()
                     self.udf_error_event.set()
-                    log_error = RemoteParallelMapReporter.log_user_function_error_async
-                    await log_error(self.job_id, self.session)
                     exc = error_info["exception"].with_traceback(traceback)
-                    # Preserve the failing input index on the exception so callers
-                    # can identify the bad item in a large batch; add a 3.11+
-                    # note so it is visible in the default traceback. Guarded
-                    # because some exception types disallow attribute writes.
+                    # Callers can inspect the bad item without changing the
+                    # traceback Python displays.
                     try:
                         exc.burla_input_index = input_index
-                        if hasattr(exc, "add_note"):
-                            exc.add_note(f"[burla] failed on input index {input_index}")
                     except Exception:
                         pass
                     raise exc

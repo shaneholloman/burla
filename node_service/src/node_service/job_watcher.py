@@ -25,8 +25,11 @@ from node_service.lifecycle_endpoints import reboot_containers
 from node_service.worker_client import (
     CPU_PRESSURE_FILE,
     READD_MAX_CPU_STALL_FRACTION,
+    READD_MAX_IO_STALL_FRACTION,
+    READD_MAX_NETWORK_UTILIZATION_FRACTION,
     READD_MAX_WORKER_MEMORY_USED_FRACTION,
     READD_PRESSURE_COOLDOWN_SECONDS,
+    AddGateSampler,
     WorkerStallTracker,
     _workers_memory_limit_bytes,
 )
@@ -229,6 +232,7 @@ async def _slot_trade_loop(session, logger):
     max_workers = OVERSUBSCRIBE_MAX_WORKERS_PER_CPU * INSTANCE_N_CPUS
     can_check_cpu = CPU_PRESSURE_FILE.exists()
     stall_tracker = WorkerStallTracker()
+    gate_sampler = AddGateSampler()
 
     while not SELF["job_watcher_stop_event"].is_set():
         await asyncio.sleep(1)
@@ -241,6 +245,7 @@ async def _slot_trade_loop(session, logger):
                 w for w in SELF["workers"] if not w.retired and not w.throttled
             ]
             stall_fraction = stall_tracker.max_stall_fraction(unthrottled_workers)
+        io_stall, network_utilization = gate_sampler.sample()
 
         if SELF["target_parallelism"] <= 0:
             return  # traded out; this node is on its way off the job
@@ -266,6 +271,10 @@ async def _slot_trade_loop(session, logger):
         if queued_inputs <= len(alive_workers):
             continue
         if stall_fraction > READD_MAX_CPU_STALL_FRACTION:
+            continue
+        if io_stall > READD_MAX_IO_STALL_FRACTION:
+            continue
+        if network_utilization > READD_MAX_NETWORK_UTILIZATION_FRACTION:
             continue
         if not IN_LOCAL_DEV_MODE and alive_workers:
             memory_limit_bytes = _workers_memory_limit_bytes(alive_workers[0])
@@ -705,6 +714,22 @@ async def reinit_node(assigned_workers: list):
     )
 
 
+async def _cancel_worker_input_tasks(workers: list):
+    # Cancel before any container kill so teardown does not get logged as
+    # "Worker container stopped unexpectedly" on in-flight calls.
+    tasks = []
+    for worker in workers:
+        task = worker.process_inputs_task
+        if task is None:
+            continue
+        worker.retired = True
+        task.cancel()
+        tasks.append(task)
+        worker.process_inputs_task = None
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 async def reset_workers(logger: Logger):
     # Stops idle or reassigned workers from holding creds for a finished job.
     NODE_AUTH_CREDENTIALS_PATH.unlink(missing_ok=True)
@@ -729,6 +754,8 @@ async def reset_workers(logger: Logger):
                     f"{task_key} crashed during the job: {e}", severity="ERROR"
                 )
             SELF[task_key] = None
+    workers = list(SELF["workers"]) + list(SELF["idle_workers"])
+    await _cancel_worker_input_tasks(workers)
     if SELF["reboot_containers_after_job"]:
         await logger.log(
             "Rebooting worker containers to restore dynamic worker capacity ..."

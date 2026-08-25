@@ -1374,7 +1374,7 @@ async def park_workers_for_memory(
             new_parallelism=new_parallelism,
         )
         await debug_log(
-            "workers_memory_parked",
+            "workers_throttled",
             reason=reason,
             input_indexes=input_indexes,
             rss_bytes=rss_bytes_list,

@@ -15,9 +15,9 @@ export const SECONDARY = "hsl(215 14% 55%)";
 // Matches the amber "warning" badge tone; used to shade throttled spans.
 const THROTTLE = "hsl(38 92% 50%)";
 
-// A span of chart time during which the worker was parked (CPU-throttled) by
-// the node's pressure controls. `intensity` is the fraction of the span's
-// sampled time actually spent throttled (0..1), used to scale the shading.
+// A span of chart time during which the worker was throttled by the node's
+// pressure controls. `intensity` is the fraction of the span's sampled time
+// actually spent throttled (0..1), used to scale the shading.
 export type ThrottleBand = {
     from: number;
     to: number;
@@ -193,7 +193,7 @@ export const MetricChart = ({
                         content={({ active, payload, label }) => {
                             if (!active || !payload?.length) return null;
                             // Binary from the user's perspective: the worker
-                            // either was or wasn't parked during this window.
+                            // either was or wasn't throttled during this window.
                             const isThrottled =
                                 Number(payload[0].payload?.throttled ?? 0) >= 0.05;
                             return (

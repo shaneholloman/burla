@@ -42,9 +42,9 @@ sample.
   Inputs that begin and end between sampling instants do not produce a task
   row.
 - `throttled` is 1 on task rows sampled while the node's pressure monitors had
-  the worker parked at the minimum CPU quota (CPU or memory pressure), else 0.
-  Node rows leave it NULL. The dashboard uses it to shade throttled spans on
-  per-call utilization charts.
+  the worker throttled to the minimum CPU quota (CPU or memory pressure), else
+  0. Node rows leave it NULL. The dashboard uses it to shade throttled spans on
+  per-call CPU and memory charts.
 
 The unique `(instance_name, timestamp, scope, worker_id)` index makes retried
 batches idempotent. The `(job_id, scope, input_index, timestamp)` index supports

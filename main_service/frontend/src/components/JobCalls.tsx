@@ -257,16 +257,18 @@ const WhyThrottled = () => {
                 Why was this throttled?
             </button>
             {isOpen && (
-                <div className="absolute left-0 top-full z-20 mt-1.5 w-80 rounded-lg border border-border bg-popover p-4 text-left shadow-md">
+                <div className="absolute left-0 top-full z-20 mt-1.5 w-[28rem] rounded-lg border border-border bg-popover px-4 py-3 text-left shadow-md">
                     <div className="eyebrow">About throttling</div>
                     <p className="mt-2 text-[12.5px] leading-relaxed text-muted-foreground">
                         This job ran with dynamic CPU/RAM (the default), which
                         oversubscribes each node so jobs finish sooner. When a node
-                        runs low on CPU or memory, it briefly pauses some workers
-                        mid-call instead of failing them; the hatched amber spans
-                        show exactly when this call was paused. Paused workers
-                        resume automatically as pressure drops, or their input is
-                        moved to another node.
+                        runs low on CPU or memory, it briefly throttles some
+                        workers mid-call instead of failing them; the hatched amber
+                        spans show exactly when this call was throttled. A
+                        throttled worker gets almost no CPU (and under memory
+                        pressure its RAM is moved to swap), then returns to full
+                        speed as pressure drops, or its input is moved to another
+                        node.
                     </p>
                     <p className="mt-2 text-[12.5px] leading-relaxed text-muted-foreground">
                         To keep a job's calls from ever being throttled, request
@@ -376,7 +378,7 @@ const CallDetail = ({
                       ),
               },
               // Only surfaces when the node's pressure controls actually
-              // parked this call's worker: the common case stays four facts.
+              // throttled this call's worker: the common case stays four facts.
               ...(throttledSec > 0
                   ? [
                         {
@@ -556,6 +558,10 @@ const CallDetail = ({
                                         compact
                                         throttleBands={throttleBands}
                                     />
+                                    {/* No throttle shading on network/disk/GPU:
+                                        throttling only acts on CPU (quota) and
+                                        memory (swap); shading the others would
+                                        imply caps that don't exist. */}
                                     <MetricChart
                                         title="Network I/O"
                                         data={taskData}
@@ -566,7 +572,6 @@ const CallDetail = ({
                                         startAt={taskStartAt}
                                         format={formatRate}
                                         compact
-                                        throttleBands={throttleBands}
                                     />
                                     <MetricChart
                                         title="Disk I/O"
@@ -578,7 +583,6 @@ const CallDetail = ({
                                         startAt={taskStartAt}
                                         format={formatRate}
                                         compact
-                                        throttleBands={throttleBands}
                                     />
                                     {series.has_gpu && (
                                         <>
@@ -592,7 +596,6 @@ const CallDetail = ({
                                                 format={(v) => `${Math.round(v)}%`}
                                                 domainMax={100}
                                                 compact
-                                                throttleBands={throttleBands}
                                             />
                                             <MetricChart
                                                 title="GPU memory"
@@ -607,7 +610,6 @@ const CallDetail = ({
                                                 startAt={taskStartAt}
                                                 format={formatBytes}
                                                 compact
-                                                throttleBands={throttleBands}
                                             />
                                         </>
                                     )}

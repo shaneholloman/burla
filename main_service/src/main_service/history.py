@@ -92,8 +92,8 @@ CREATE TABLE IF NOT EXISTS resource_metrics (
     gpu_percent REAL,
     gpu_memory_bytes INTEGER,
     gpu_memory_percent REAL,
-    -- 1 while the sampled worker was parked (CPU-throttled) by the node's
-    -- pressure monitors, NULL on node-scope rows. Last on purpose: matches
+    -- 1 while the sampled worker was throttled by the node's pressure
+    -- monitors, NULL on node-scope rows. Last on purpose: matches
     -- where the ALTER migration puts it on pre-existing databases, so
     -- import_snapshot's schema equality check passes between any two
     -- databases on this version.

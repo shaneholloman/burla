@@ -19,6 +19,7 @@ import {
     formatBytes,
     formatDuration,
     formatRate,
+    type ThrottleBand,
 } from "@/components/JobMetricChart";
 import { cn } from "@/lib/utils";
 import { managementJson } from "@/lib/managementApi";
@@ -33,6 +34,7 @@ type TaskPoint = {
     disk_write: number;
     gpu: number | null;
     gpu_mem: number | null;
+    throttled: number;
 };
 
 type TaskSeries = {
@@ -41,6 +43,7 @@ type TaskSeries = {
     prev_index: number | null;
     next_index: number | null;
     n_attempts: number;
+    throttled_sec: number;
     bucket_sec: number;
     points: TaskPoint[];
 };
@@ -119,6 +122,7 @@ const mapSeries = (payload: any): TaskSeries => ({
     prev_index: payload.previous_input_index,
     next_index: payload.next_input_index,
     n_attempts: payload.attempt_count,
+    throttled_sec: payload.throttled_seconds,
     bucket_sec: payload.bucket_seconds,
     points: payload.points.map((point) => ({
         t: Date.parse(point.timestamp) / 1000,
@@ -130,8 +134,46 @@ const mapSeries = (payload: any): TaskSeries => ({
         disk_write: point.disk_write_bytes_per_second,
         gpu: point.gpu_percent ?? null,
         gpu_mem: point.gpu_memory_bytes ?? null,
+        throttled: point.throttled_fraction,
     })),
 });
+
+// Merge bucket-level throttled fractions into contiguous shaded spans. A
+// bucket counts as throttled above a 5% floor (ignores hairline flapping);
+// spans break where sampling gaps exceed one bucket. Each point covers
+// [t, t + bucket_sec), so spans extend one bucket past their last point.
+const computeThrottleBands = (series: TaskSeries): ThrottleBand[] => {
+    const bucket = series.bucket_sec || 1;
+    const bands: ThrottleBand[] = [];
+    let from: number | null = null;
+    let lastT = 0;
+    let fractionSum = 0;
+    let count = 0;
+    const close = () => {
+        if (from != null) {
+            bands.push({ from, to: lastT + bucket, intensity: fractionSum / count });
+            from = null;
+        }
+    };
+    for (const point of series.points) {
+        const isThrottled = point.throttled >= 0.05;
+        if (isThrottled && from != null && point.t - lastT > bucket * 1.5) close();
+        if (isThrottled) {
+            if (from == null) {
+                from = point.t;
+                fractionSum = 0;
+                count = 0;
+            }
+            fractionSum += point.throttled;
+            count += 1;
+            lastT = point.t;
+        } else {
+            close();
+        }
+    }
+    close();
+    return bands;
+};
 
 const iconBtnClass = (disabled: boolean) =>
     disabled
@@ -235,6 +277,15 @@ const CallDetail = ({
 
     const taskData = useMemo(() => series?.points ?? [], [series]);
     const taskStartAt = taskData.length ? taskData[0].t : 0;
+    const throttleBands = useMemo(
+        () => (series ? computeThrottleBands(series) : []),
+        [series]
+    );
+    const throttledSec = series?.throttled_sec ?? 0;
+    const throttledShare =
+        summary?.duration_sec != null && summary.duration_sec > 0
+            ? Math.min(100, Math.round((100 * throttledSec) / summary.duration_sec))
+            : null;
 
     const facts: { label: string; value: React.ReactNode }[] = summary
         ? [
@@ -247,6 +298,25 @@ const CallDetail = ({
                           <span className="text-muted-foreground">No samples</span>
                       ),
               },
+              // Only surfaces when the node's pressure controls actually
+              // parked this call's worker: the common case stays four facts.
+              ...(throttledSec > 0
+                  ? [
+                        {
+                            label: "Throttled",
+                            value: (
+                                <span className="inline-flex items-baseline gap-1.5">
+                                    {formatDuration(throttledSec)}
+                                    {throttledShare != null && (
+                                        <span className="text-muted-foreground">
+                                            · {throttledShare}% of runtime
+                                        </span>
+                                    )}
+                                </span>
+                            ),
+                        },
+                    ]
+                  : []),
               {
                   label: "Attempts",
                   value:
@@ -395,6 +465,7 @@ const CallDetail = ({
                                         startAt={taskStartAt}
                                         format={(v) => v.toFixed(2)}
                                         compact
+                                        throttleBands={throttleBands}
                                     />
                                     <MetricChart
                                         title="Memory"
@@ -403,6 +474,7 @@ const CallDetail = ({
                                         startAt={taskStartAt}
                                         format={formatBytes}
                                         compact
+                                        throttleBands={throttleBands}
                                     />
                                     <MetricChart
                                         title="Network I/O"
@@ -414,6 +486,7 @@ const CallDetail = ({
                                         startAt={taskStartAt}
                                         format={formatRate}
                                         compact
+                                        throttleBands={throttleBands}
                                     />
                                     <MetricChart
                                         title="Disk I/O"
@@ -425,6 +498,7 @@ const CallDetail = ({
                                         startAt={taskStartAt}
                                         format={formatRate}
                                         compact
+                                        throttleBands={throttleBands}
                                     />
                                     {series.has_gpu && (
                                         <>
@@ -438,6 +512,7 @@ const CallDetail = ({
                                                 format={(v) => `${Math.round(v)}%`}
                                                 domainMax={100}
                                                 compact
+                                                throttleBands={throttleBands}
                                             />
                                             <MetricChart
                                                 title="GPU memory"
@@ -452,6 +527,7 @@ const CallDetail = ({
                                                 startAt={taskStartAt}
                                                 format={formatBytes}
                                                 compact
+                                                throttleBands={throttleBands}
                                             />
                                         </>
                                     )}

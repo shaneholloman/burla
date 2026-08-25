@@ -701,6 +701,11 @@ async def reinit_node(assigned_workers: list):
     current_workers = assigned_workers + SELF["idle_workers"]
     for w in current_workers:
         w.is_idle = True
+        # _cancel_worker_input_tasks marks every worker retired to mute
+        # teardown-kill logging; workers only reach here (the no-reboot reuse
+        # path) when none genuinely died, so un-retire them or the next job
+        # starts with zero alive workers and strands its inputs.
+        w.retired = False
 
     current_container_config = SELF["current_container_config"]
     authorized_users = SELF["authorized_users"]

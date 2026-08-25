@@ -25,17 +25,23 @@ inline: `BURLA_CLUSTER_DASHBOARD_URL="$(make -s cluster-info | awk
 prior shell export or automatic cluster resolution; it can select the deployed
 test cluster instead of this worktree's cluster.
 
-Start a cluster from its worktree with `make local-dev` (whole cluster local, for
-light work: frontend, dashboard, head/API behavior) or `make remote-dev` (head
-local, nodes are real EC2 in the Burla test AWS account, for real scale or
-real-VM behavior, or when this machine cannot take another local cluster).
-Development happens in AWS; GCP is production-only. Read the
-`burla-parallel-dev` skill before starting or stopping a cluster.
+Start a local cluster from its worktree with `make dev-up` (whole cluster
+local, for light work: frontend, dashboard, head/API behavior). It runs
+detached in its own OS session, so it survives agent-session cleanup and stays
+up until `make dev-down`; never start a cluster as a plain foreground or
+backgrounded agent shell, which dies when the agent's terminals are reaped.
+Use `make remote-dev` (head local, nodes are real EC2 in the Burla test AWS
+account) for real scale or real-VM behavior, or when this machine cannot take
+another local cluster. Development happens in AWS; GCP is production-only.
+Read the `burla-parallel-dev` skill before starting or stopping a cluster.
 
-Stop a dev cluster in the terminal running `make local-dev` or `make
-remote-dev`; the cluster cleans up its own nodes. `make stop-all` is emergency
-machine-wide cleanup and destroys every local dev cluster. Never `docker rm`
-containers by `node_*` name prefix: that destroys other agents' clusters.
+A local cluster's job history (`_local_dev_state`) persists across restarts,
+so past jobs' dashboard pages keep working after `make dev-down && make
+dev-up`; wipe it only with `make dev-clean`. Stop a local cluster with `make
+dev-down` (and remote-dev in its own terminal); the cluster cleans up its own
+nodes. `make stop-all` is emergency machine-wide cleanup and destroys every
+local dev cluster. Never `docker rm` containers by `node_*` name prefix: that
+destroys other agents' clusters.
 Workers are containers *inside* their node's own docker daemon (each local node
 is a privileged fake VM running dockerd), so they die with the node; inspect
 them with `docker exec node_<id> docker ps`.

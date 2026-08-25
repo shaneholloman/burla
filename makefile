@@ -41,9 +41,9 @@ define TEST_SHELL
 			python -m burla._test_shell
 endef
 
-.PHONY: 3.11-dev 3.12-dev 3.13-dev 3.14-dev local-dev remote-dev local-images \
-	image-seed stop-all cluster-info node-logs test test-service test-e2e \
-	test-dashboard kill-kernels
+.PHONY: 3.11-dev 3.12-dev 3.13-dev 3.14-dev local-dev dev-up dev-down \
+	dev-clean remote-dev local-images image-seed stop-all cluster-info \
+	node-logs test test-service test-e2e test-dashboard kill-kernels
 
 3.11-dev:
 	$(call TEST_SHELL,3.11)
@@ -108,6 +108,7 @@ node-logs:
 # nodes; this removes every local cluster's containers and caches.
 stop-all:
 	set -e; \
+	pkill -f 'python -m burla._local_dev' 2>/dev/null || true; \
 	ids=$$(docker ps -aq --filter label=burla-cluster); \
 	if [ -n "$$ids" ]; then docker rm -f -v $$ids >/dev/null; fi; \
 	vols=$$(docker volume ls -q --filter label=burla-cluster); \
@@ -154,6 +155,12 @@ image-seed:
 # with LOCAL_DEV_NODE_QUANTITY). Needs a working AWS identity + saved cluster
 # token: nodes authorize callers against the backend's user list for this
 # cluster id, so a bogus id makes every node fail to boot.
+#
+# `_local_dev_state` (the head's SQLite history) survives restarts on purpose:
+# past jobs' dashboard pages keep working after the head is killed and brought
+# back. Rehydrated nodes/jobs whose processes died with the old head are
+# retired by the head's node/job reapers a few minutes after startup, exactly
+# as in prod. `make dev-clean` wipes the state when a fresh start is wanted.
 local-dev:
 	set -e; \
 	if nc -z localhost $(BURLA_HEAD_PORT) 2>/dev/null; then \
@@ -206,9 +213,10 @@ local-dev:
 	echo "Starting cluster [$(BURLA_CLUSTER_NAME)] at $(BURLA_DASHBOARD_URL) (cluster id $${PROJECT_ID})"; \
 	ids=$$(docker ps -aq --filter label=burla-cluster=$(BURLA_CLUSTER_NAME)); \
 	if [ -n "$$ids" ]; then docker rm -f $$ids >/dev/null; fi; \
-	for scratch in _shared_workspace _node_auth _local_dev_state; do \
+	for scratch in _shared_workspace _node_auth; do \
 		rm -rf ./$$scratch; mkdir -p ./$$scratch; chmod 777 ./$$scratch; \
 	done; \
+	mkdir -p ./_local_dev_state; chmod 777 ./_local_dev_state; \
 	docker network create $(BURLA_CLUSTER_NETWORK) 2>/dev/null || true; \
 	BURLA_ENVIRONMENT=test \
 	PROJECT_ID=$${PROJECT_ID} \
@@ -227,6 +235,66 @@ local-dev:
 	PORT=$(BURLA_HEAD_PORT) \
 	HISTORY_DB_PATH=$(PWD)/_local_dev_state/history.db \
 	uv run --project $(PROJECT_ABS) --group dev python -m burla._local_dev
+
+# Detached twin of `local-dev`: the cluster runs in its own process session,
+# owned by the OS instead of the terminal (or agent session) that started it,
+# so it stays up until `make dev-down`. Logs stream to
+# _local_dev_state/head.log. The 10m startup budget covers a first-run node
+# image build.
+dev-up:
+	@set -e; \
+	if nc -z localhost $(BURLA_HEAD_PORT) 2>/dev/null; then \
+		echo "Cluster [$(BURLA_CLUSTER_NAME)] is already up at $(BURLA_DASHBOARD_URL)"; \
+		exit 0; \
+	fi; \
+	mkdir -p _local_dev_state; \
+	python3 -c 'import subprocess; p = subprocess.Popen(["make", "local-dev"], stdout=open("_local_dev_state/head.log", "w"), stderr=subprocess.STDOUT, start_new_session=True); open("_local_dev_state/head.pid", "w").write(str(p.pid))'; \
+	echo "Starting cluster [$(BURLA_CLUSTER_NAME)] detached (log: _local_dev_state/head.log)"; \
+	for i in $$(seq 1 120); do \
+		if nc -z localhost $(BURLA_HEAD_PORT) 2>/dev/null; then \
+			echo "Cluster [$(BURLA_CLUSTER_NAME)] is up at $(BURLA_DASHBOARD_URL)"; \
+			exit 0; \
+		fi; \
+		if ! kill -0 $$(cat _local_dev_state/head.pid) 2>/dev/null; then \
+			echo "Cluster process exited during startup; last log lines:"; \
+			tail -20 _local_dev_state/head.log; \
+			exit 1; \
+		fi; \
+		sleep 5; \
+	done; \
+	echo "Timed out waiting for the head; see _local_dev_state/head.log"; \
+	exit 1
+
+# Stop the detached cluster: SIGINT its whole session (same as ctrl-C on a
+# foreground `make local-dev`) so the head deletes its own nodes, then
+# force-remove any container left carrying this cluster's label. History in
+# _local_dev_state is kept; `make dev-up` serves it again.
+dev-down:
+	@pid=$$(cat _local_dev_state/head.pid 2>/dev/null || true); \
+	if [ -n "$$pid" ] && kill -0 $$pid 2>/dev/null; then \
+		kill -INT -- -$$pid 2>/dev/null || kill -INT $$pid; \
+		for i in $$(seq 1 30); do \
+			kill -0 $$pid 2>/dev/null || break; \
+			sleep 1; \
+		done; \
+		kill -0 $$pid 2>/dev/null && { kill -KILL -- -$$pid 2>/dev/null || true; }; \
+		echo "Cluster [$(BURLA_CLUSTER_NAME)] stopped."; \
+	else \
+		echo "No detached cluster process for [$(BURLA_CLUSTER_NAME)]."; \
+	fi; \
+	rm -f _local_dev_state/head.pid; \
+	ids=$$(docker ps -aq --filter label=burla-cluster=$(BURLA_CLUSTER_NAME)); \
+	if [ -n "$$ids" ]; then docker rm -f $$ids >/dev/null; fi
+
+# Wipe this worktree's persisted local-dev state (job history, head log).
+# Refuses while the cluster is up: the head would keep writing to a deleted db.
+dev-clean:
+	@if nc -z localhost $(BURLA_HEAD_PORT) 2>/dev/null; then \
+		echo "Cluster [$(BURLA_CLUSTER_NAME)] is running; make dev-down first."; \
+		exit 1; \
+	fi; \
+	rm -rf _local_dev_state; \
+	echo "Cleared _local_dev_state for [$(BURLA_CLUSTER_NAME)]."
 
 # `main_service` runs here as a local subprocess hot-reloading this checkout;
 # nodes are real cloud VMs: EC2 in the Burla test AWS account by default, or

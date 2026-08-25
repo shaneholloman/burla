@@ -442,6 +442,10 @@ async def start_job(
         "function_size_gb": float(body.get("function_size_gb") or 0.0),
         "started_at": float(body.get("started_at") or time()),
         "is_background_job": bool(body.get("is_background_job")),
+        # Set by nested rpm calls made from inside a worker: this job then
+        # nests under the enclosing job in the dashboard instead of appearing
+        # as its own top-level row.
+        "parent_job_id": body.get("parent_job_id"),
         "all_inputs_uploaded": False,
         "client_has_all_results": False,
         "fail_reason": [],

@@ -35,6 +35,17 @@ export interface BurlaJob {
     started_at?: Date; // parsed from UNIX timestamp in jobContext & jobs_paginated
     ended_at?: Date;
     function_name?: string;
+    // Set when this job was started by a nested remote_parallel_map call
+    // inside another job's worker.
+    parent_job_id?: string | null;
+    // Number of jobs nested directly inside this one.
+    nested_job_count?: number;
+}
+
+// One hop in a nested job's chain of enclosing jobs, outermost first.
+export interface JobAncestor {
+    job_id: string;
+    function_name: string;
 }
 
 export interface Settings {

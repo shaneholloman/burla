@@ -1,4 +1,5 @@
 import { useJobs } from "@/contexts/JobsContext";
+import { BurlaJob } from "@/types/coreTypes";
 import { Card, CardContent } from "@/components/ui/card";
 import {
   Table,
@@ -8,14 +9,31 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { ListChecks } from "lucide-react";
+import { ListChecks, ListTree } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { StatusBadge, jobStatusBadge } from "@/components/StatusBadge";
 import { TablePagination } from "@/components/TablePagination";
 
-export const JobsList = () => {
-  const { jobs, page, setPage, totalPages, isLoading } = useJobs();
+interface JobsTableProps {
+  jobs: BurlaJob[];
+  isLoading: boolean;
+  page: number;
+  totalPages: number;
+  onPageChange: (page: number) => void;
+  emptyState: React.ReactNode;
+}
+
+// Presentational jobs table: used by the top-level jobs page and by the
+// "Nested jobs" section on each job's detail page.
+export const JobsTable = ({
+  jobs,
+  isLoading,
+  page,
+  totalPages,
+  onPageChange,
+  emptyState,
+}: JobsTableProps) => {
   const navigate = useNavigate();
 
   const [userTimeZone, setUserTimeZone] = useState<string>(() => {
@@ -101,16 +119,7 @@ export const JobsList = () => {
             <div className="h-5 w-5 animate-spin rounded-full border-2 border-border border-t-primary" />
           </div>
         ) : jobs.length === 0 ? (
-          <div className="flex flex-col items-center justify-center px-6 py-14 text-center">
-            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-muted">
-              <ListChecks className="h-[18px] w-[18px] text-muted-foreground" />
-            </div>
-            <p className="mt-3 text-sm font-medium text-foreground">No jobs yet</p>
-            <p className="mt-1 text-[13px] text-muted-foreground">
-              Jobs appear here when you call{" "}
-              <code className="font-mono text-xs">remote_parallel_map</code>.
-            </p>
-          </div>
+          emptyState
         ) : (
           <>
             {/* CONTAIN OVERFLOW HERE so the PAGE doesn't get a horizontal scrollbar */}
@@ -136,6 +145,7 @@ export const JobsList = () => {
                     const pct = job.n_inputs
                       ? Math.min(100, (successfulCount / job.n_inputs) * 100)
                       : 0;
+                    const nestedCount = job.nested_job_count ?? 0;
                     return (
                       <TableRow
                         key={job.id}
@@ -153,13 +163,24 @@ export const JobsList = () => {
                         </TableCell>
 
                         <TableCell>
-                          <div className="max-w-[320px] truncate">
+                          <div className="flex max-w-[320px] items-center">
                             <span
                               title={job.function_name ?? "Unknown"}
-                              className="font-mono text-[13px] font-medium text-foreground"
+                              className="truncate font-mono text-[13px] font-medium text-foreground"
                             >
                               {job.function_name ?? "Unknown"}
                             </span>
+                            {nestedCount > 0 && (
+                              <span
+                                title={`Contains ${nestedCount.toLocaleString()} nested job${
+                                  nestedCount === 1 ? "" : "s"
+                                }`}
+                                className="ml-2 inline-flex shrink-0 items-center gap-1 rounded-full border border-border bg-muted/60 px-1.5 py-[2px] text-[11px] font-medium leading-none tabular-nums text-muted-foreground"
+                              >
+                                <ListTree className="h-3 w-3" />
+                                {nestedCount.toLocaleString()}
+                              </span>
+                            )}
                           </div>
                         </TableCell>
 
@@ -200,12 +221,39 @@ export const JobsList = () => {
               </Table>
             </div>
 
-            <div className="px-5 pb-4">
-              <TablePagination page={page} totalPages={totalPages} onPageChange={setPage} />
-            </div>
+            {totalPages > 1 && (
+              <div className="px-5 pb-4">
+                <TablePagination page={page} totalPages={totalPages} onPageChange={onPageChange} />
+              </div>
+            )}
           </>
         )}
       </CardContent>
     </Card>
+  );
+};
+
+export const JobsList = () => {
+  const { jobs, page, setPage, totalPages, isLoading } = useJobs();
+  return (
+    <JobsTable
+      jobs={jobs}
+      isLoading={isLoading}
+      page={page}
+      totalPages={totalPages}
+      onPageChange={setPage}
+      emptyState={
+        <div className="flex flex-col items-center justify-center px-6 py-14 text-center">
+          <div className="flex h-10 w-10 items-center justify-center rounded-full bg-muted">
+            <ListChecks className="h-[18px] w-[18px] text-muted-foreground" />
+          </div>
+          <p className="mt-3 text-sm font-medium text-foreground">No jobs yet</p>
+          <p className="mt-1 text-[13px] text-muted-foreground">
+            Jobs appear here when you call{" "}
+            <code className="font-mono text-xs">remote_parallel_map</code>.
+          </p>
+        </div>
+      }
+    />
   );
 };

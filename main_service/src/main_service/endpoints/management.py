@@ -578,6 +578,20 @@ def stream_node_logs(
     )
 
 
+def _ancestors(parent_job_id: str | None) -> list[dict]:
+    """The chain of enclosing jobs for a nested job, outermost first."""
+    chain = []
+    current = parent_job_id
+    while current is not None:
+        job = cluster_state.get_job(current)
+        chain.append(
+            {"job_id": current, "function_name": job.get("function_name", "Unknown")}
+        )
+        current = job.get("parent_job_id")
+    chain.reverse()
+    return chain
+
+
 def _job_dto(raw: dict) -> dict:
     job_id = raw["job_id"]
     live = cluster_state.get_job(job_id)
@@ -612,6 +626,9 @@ def _job_dto(raw: dict) -> dict:
         "status": status,
         "user": job.get("user", "Unknown"),
         "function_name": job.get("function_name", "Unknown"),
+        "parent_job_id": job.get("parent_job_id"),
+        "ancestors": _ancestors(job.get("parent_job_id")),
+        "nested_job_count": history.job_child_count(job_id),
         "image": job.get("image"),
         "max_parallelism": job.get("max_parallelism"),
         "resources_per_call": {
@@ -651,6 +668,7 @@ def list_jobs(
     status: str | None = None,
     user: str | None = None,
     function_name: str | None = None,
+    parent_job_id: str | None = None,
     started_after: str | None = None,
     started_before: str | None = None,
     sort: str = "started_at",
@@ -658,6 +676,8 @@ def list_jobs(
     limit: int = 100,
     cursor: str | None = None,
 ):
+    """Without parent_job_id this lists top-level jobs only; pass a job id
+    to list the jobs nested directly inside it."""
     if status and status not in {"running", "completed", "failed", "canceled"}:
         raise ManagementAPIError(422, "INVALID_ARGUMENT", "Invalid job status.")
     sort_fields = {
@@ -679,6 +699,7 @@ def list_jobs(
         "status": status,
         "user": user,
         "function_name": function_name,
+        "parent_job_id": parent_job_id,
         "started_after": started_after,
         "started_before": started_before,
         "sort": sort,
@@ -690,6 +711,7 @@ def list_jobs(
         status=status,
         user=user,
         function_name=function_name,
+        parent_job_id=parent_job_id,
         started_after=after,
         started_before=before,
         sort=sort,
@@ -712,28 +734,58 @@ def list_jobs(
     }
 
 
+def _watched_row_id(job_id: str, parent_job_id: str | None) -> str | None:
+    """The row a jobs list scoped to parent_job_id must refresh when job_id
+    changes: the ancestor of job_id sitting directly under parent_job_id
+    (job_id itself when its parent is parent_job_id), or None when job_id is
+    not inside parent_job_id at all. For the top-level list this resolves
+    any nested job to its outermost ancestor, whose nested counts and status
+    reflect activity happening inside it."""
+    current = job_id
+    while True:
+        job = cluster_state.get_job(current)
+        if job is None:
+            return None
+        parent = job.get("parent_job_id")
+        if parent == parent_job_id:
+            return current
+        if parent is None:
+            return None
+        current = parent
+
+
+def _watched_row_ids(job_ids, parent_job_id: str | None) -> list[str]:
+    rows = []
+    for job_id in job_ids:
+        row_id = _watched_row_id(job_id, parent_job_id)
+        if row_id is not None and row_id not in rows:
+            rows.append(row_id)
+    return rows
+
+
 @router.get("/jobs/watch")
-def watch_jobs():
+def watch_jobs(parent_job_id: str | None = None):
     async def stream():
         queue = cluster_state.subscribe_job_events()
         started_at = time()
         try:
-            snapshot = list_jobs(limit=100)["items"]
+            snapshot = list_jobs(parent_job_id=parent_job_id, limit=100)["items"]
             yield _sse("snapshot", {"items": snapshot})
             last_sent_at = time()
             while time() - started_at < SSE_MAX_DURATION_SECONDS:
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=1)
-                    job_id = event["job_id"]
-                    yield _sse("update", _job_or_404(job_id))
-                    last_sent_at = time()
+                    row_ids = _watched_row_ids([event["job_id"]], parent_job_id)
                 except asyncio.TimeoutError:
-                    for job_id in cluster_state.running_job_ids():
-                        yield _sse("update", _job_or_404(job_id))
-                        last_sent_at = time()
-                    if time() - last_sent_at > 15:
-                        yield _sse("keepalive", {})
-                        last_sent_at = time()
+                    row_ids = _watched_row_ids(
+                        cluster_state.running_job_ids(), parent_job_id
+                    )
+                for row_id in row_ids:
+                    yield _sse("update", _job_or_404(row_id))
+                    last_sent_at = time()
+                if time() - last_sent_at > 15:
+                    yield _sse("keepalive", {})
+                    last_sent_at = time()
         finally:
             cluster_state.unsubscribe(queue)
 

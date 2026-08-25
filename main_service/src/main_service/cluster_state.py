@@ -313,6 +313,19 @@ def get_job_start_response(job_id: str) -> dict | None:
         return dict(response) if response is not None else None
 
 
+def _cancelable_child_ids(job_id: str) -> list[str]:
+    """Must be called with _lock held. RUNNING jobs started from inside this
+    job's workers, minus detached ones that finished uploading inputs (those
+    survive their client's death by design)."""
+    return [
+        child_id
+        for child_id, child in JOBS.items()
+        if child.get("parent_job_id") == job_id
+        and child.get("status") == "RUNNING"
+        and not (child.get("is_background_job") and child.get("all_inputs_uploaded"))
+    ]
+
+
 def update_job(
     job_id: str, updates: dict, append_fail_reason: str | None = None
 ) -> bool:
@@ -351,12 +364,49 @@ def update_job(
                 if node.get("reserved_for_job") == job_id:
                     node["reserved_for_job"] = None
                     released_nodes.append(dict(node))
+        children_to_cancel = []
+        if entered_terminal and job.get("status") in ("FAILED", "CANCELED"):
+            children_to_cancel = _cancelable_child_ids(job_id)
         snapshot = dict(job)
         history.upsert_job_and_nodes(job_id, snapshot, released_nodes)
 
     for node in released_nodes:
         _publish(_node_event_queues, {"deleted": False, **node})
     _publish(_job_event_queues, {"job_id": job_id, **_job_summary(snapshot)})
+
+    # A dead parent takes its running nested jobs with it: their clients live
+    # inside its (now killed) workers, so without this they linger a few
+    # seconds then fail with "Client DC". Recursion cancels deeper levels.
+    parent_status = str(snapshot.get("status", "")).lower()
+    for child_id in children_to_cancel:
+        now = time()
+        history.add_job_logs(
+            child_id,
+            [
+                {
+                    "logs": [
+                        {
+                            "timestamp": now,
+                            "message": f"Job canceled because its parent job was {parent_status}.",
+                        }
+                    ],
+                    "timestamp": now,
+                    "is_error": True,
+                }
+            ],
+        )
+        update_job(
+            child_id,
+            {
+                "status": "CANCELED",
+                "dashboard_canceled": True,
+                "terminal_reason": {
+                    "code": "parent_terminated",
+                    "source": "cascade",
+                    "message": f"The parent job {job_id} was {parent_status}.",
+                },
+            },
+        )
 
     if became_failed:
         # Lazy import: helpers imports from the main_service package, which
@@ -511,6 +561,7 @@ def _job_summary(job: dict) -> dict:
         "n_results": sum(p.get("current_num_results", 0) for p in assigned.values()),
         "started_at": job.get("started_at"),
         "ended_at": job.get("ended_at"),
+        "parent_job_id": job.get("parent_job_id"),
     }
 
 

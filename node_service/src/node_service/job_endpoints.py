@@ -424,6 +424,8 @@ async def execute(
                 "auth_token": auth_token,
                 "project_id": PROJECT_ID,
                 "cluster_dashboard_url": cluster_dashboard_url,
+                # Nested rpm calls send this as their job's parent_job_id.
+                "current_job_id": job_id,
             }
         )
     )

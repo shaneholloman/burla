@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import io
+import json
 import pickle
 import ssl
 import sys
@@ -34,8 +35,13 @@ import aiohttp
 import cloudpickle
 from yaspin import Spinner, yaspin
 
-from burla import __version__
-from burla._cluster_client import ClusterClient, NodesBusy, _local_host_from
+from burla import CONFIG_PATH, __version__
+from burla._cluster_client import (
+    ClusterClient,
+    NodesBusy,
+    _in_burla_worker,
+    _local_host_from,
+)
 from burla._env_scan import (
     local_module_source_zip,
     modules_to_pickle_by_value,
@@ -70,6 +76,15 @@ from burla._reporting import (
 
 _FUNCTION_PAYLOAD_MAGIC = b"BURLA_FUNCTION_V2\0"
 _FUNCTION_PICKLE_LOCK = Lock()
+
+
+def _parent_job_id() -> Optional[str]:
+    """Inside a worker, the node writes the enclosing job's id into the
+    credentials file it mounts at CONFIG_PATH; nested rpm calls report it so
+    the dashboard can nest their jobs under the enclosing one."""
+    if not _in_burla_worker():
+        return None
+    return json.loads(CONFIG_PATH.read_text()).get("current_job_id")
 
 
 def _pickle_function(function_: Callable, local_module_names: set) -> bytes:
@@ -306,6 +321,7 @@ async def _execute_job(
         "func_gpu": func_gpu,
         "region": region,
         "disk_gb": disk_gb,
+        "parent_job_id": _parent_job_id(),
     }
     # On 503 nodes_busy, show boot progress via the polling loop then try
     # once more. Any other known error surfaces as its domain exception

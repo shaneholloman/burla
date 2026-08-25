@@ -1,9 +1,10 @@
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { useEffect, useRef, useState } from "react";
 import { useJobs } from "@/contexts/JobsContext";
-import { BurlaJob, JobsStatus } from "@/types/coreTypes";
+import { BurlaJob, JobAncestor, JobsStatus } from "@/types/coreTypes";
 import JobCalls from "@/components/JobCalls";
 import JobUtilization from "@/components/JobUtilization";
+import { NestedJobs } from "@/components/NestedJobs";
 import { Button } from "@/components/ui/button";
 import { ChevronRight, PowerOff } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
@@ -51,6 +52,8 @@ const JobDetails = () => {
     const [isStatsLoading, setIsStatsLoading] = useState(true);
     const [statsLoadError, setStatsLoadError] = useState(false);
     const [jobDoc, setJobDoc] = useState<JobDoc | null>(null);
+    // Chain of enclosing jobs (outermost first) when this job is nested.
+    const [ancestors, setAncestors] = useState<JobAncestor[]>([]);
     // Deep links can target jobs outside the first page held by the jobs context.
     const [fetchedJob, setFetchedJob] = useState<BurlaJob | null>(null);
     const hasCompletedInitialStatsLoadRef = useRef(false);
@@ -185,6 +188,7 @@ const JobDetails = () => {
         setIsStatsLoading(true);
         setFetchedJob(null);
         setJobEvents([]);
+        setAncestors([]);
         hasCompletedInitialStatsLoadRef.current = false;
     }, [jobId]);
 
@@ -218,6 +222,7 @@ const JobDetails = () => {
                     func_gpu: payload?.resources_per_call?.gpu,
                 });
                 setJobEvents(payload?.notices ?? []);
+                setAncestors(payload?.ancestors ?? []);
                 setFetchedJob({
                     id: jobId,
                     status: String(payload?.status || "unknown").toUpperCase() as JobsStatus,
@@ -377,15 +382,27 @@ const JobDetails = () => {
     return (
         <div className="flex flex-1 flex-col min-h-0 min-w-0">
             <div className="mx-auto flex w-full max-w-6xl flex-1 flex-col min-h-0">
-                {/* Breadcrumb */}
-                <nav className="flex items-center gap-1 text-[13px] text-muted-foreground">
+                {/* Breadcrumb: nested jobs show their chain of enclosing jobs. */}
+                <nav className="flex flex-wrap items-center gap-1 text-[13px] text-muted-foreground">
                     <Link
                         to="/jobs"
                         className="rounded font-medium transition-colors duration-150 hover:text-foreground"
                     >
                         Jobs
                     </Link>
-                    <ChevronRight className="h-3.5 w-3.5" />
+                    {ancestors.map((ancestor) => (
+                        <span key={ancestor.job_id} className="flex min-w-0 items-center gap-1">
+                            <ChevronRight className="h-3.5 w-3.5 shrink-0" />
+                            <Link
+                                to={`/jobs/${ancestor.job_id}`}
+                                title={ancestor.function_name}
+                                className="max-w-[200px] truncate rounded font-mono text-xs transition-colors duration-150 hover:text-foreground"
+                            >
+                                {ancestor.function_name}
+                            </Link>
+                        </span>
+                    ))}
+                    <ChevronRight className="h-3.5 w-3.5 shrink-0" />
                     <span className="truncate font-mono text-xs">{job.id}</span>
                 </nav>
 
@@ -527,6 +544,10 @@ const JobDetails = () => {
                                 </div>
                             </div>
                         )}
+
+                        {/* Jobs started by nested rpm calls inside this job's
+                            workers; hidden when there are none. */}
+                        <NestedJobs key={job.id} jobId={job.id} />
 
                         {/* Function calls */}
                         <div className="mb-4">

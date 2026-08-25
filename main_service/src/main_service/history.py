@@ -33,12 +33,17 @@ CREATE TABLE IF NOT EXISTS jobs (
     n_inputs INTEGER,
     n_results INTEGER DEFAULT 0,
     data TEXT,
-    -- Last on purpose: matches where the ALTER migration below puts it on
-    -- pre-existing databases, so import_snapshot's positional SELECT * works
-    -- between any two databases on this version.
-    ended_at REAL
+    -- The two trailing columns stay in this order on purpose: it matches
+    -- where the ALTER migrations below put them on pre-existing databases,
+    -- so import_snapshot's positional SELECT * works between any two
+    -- databases on this version.
+    ended_at REAL,
+    -- Set when this job was started by a nested rpm call inside another
+    -- job's worker; NULL for top-level jobs.
+    parent_job_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_started_at ON jobs(started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_jobs_parent_job_id ON jobs(parent_job_id);
 
 CREATE TABLE IF NOT EXISTS job_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -180,10 +185,19 @@ def _connection() -> sqlite3.Connection:
         ):
             if column not in existing:
                 _conn.execute(f"ALTER TABLE resource_metrics ADD COLUMN {column} {column_type}")
-        # Jobs tables created before job durations existed lack ended_at.
+        # Jobs tables created before job durations existed lack ended_at, and
+        # ones created before nested jobs existed lack parent_job_id. Order
+        # matters: it must match the column order in _SCHEMA (see the comment
+        # there).
         existing_job_columns = {row[1] for row in _conn.execute("PRAGMA table_info(jobs)")}
         if "ended_at" not in existing_job_columns:
             _conn.execute("ALTER TABLE jobs ADD COLUMN ended_at REAL")
+        if "parent_job_id" not in existing_job_columns:
+            _conn.execute("ALTER TABLE jobs ADD COLUMN parent_job_id TEXT")
+            _conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_jobs_parent_job_id "
+                "ON jobs(parent_job_id)"
+            )
         _conn.execute(_NODE_SERIES_INDEX)
         _conn.execute(_TASK_SUMMARY_INDEX)
         _conn.commit()
@@ -892,11 +906,12 @@ def _upsert_job(conn: sqlite3.Connection, job_id: str, job: dict):
     data = {k: v for k, v in job.items() if k != "assigned_nodes"}
     conn.execute(
         "INSERT INTO jobs (job_id, started_at, ended_at, status, user, function_name, "
-        "n_inputs, n_results, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "n_inputs, n_results, parent_job_id, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(job_id) DO UPDATE SET started_at = excluded.started_at, "
         "ended_at = excluded.ended_at, status = excluded.status, user = excluded.user, "
         "function_name = excluded.function_name, n_inputs = excluded.n_inputs, "
-        "n_results = MAX(jobs.n_results, excluded.n_results), data = excluded.data",
+        "n_results = MAX(jobs.n_results, excluded.n_results), "
+        "parent_job_id = excluded.parent_job_id, data = excluded.data",
         (
             job_id,
             job.get("started_at"),
@@ -906,6 +921,7 @@ def _upsert_job(conn: sqlite3.Connection, job_id: str, job: dict):
             job.get("function_name"),
             job.get("n_inputs"),
             n_results,
+            job.get("parent_job_id"),
             json.dumps(data),
         ),
     )
@@ -1321,6 +1337,7 @@ def management_jobs_page(
     status: str | None,
     user: str | None,
     function_name: str | None,
+    parent_job_id: str | None,
     started_after: float | None,
     started_before: float | None,
     sort: str,
@@ -1342,6 +1359,13 @@ def management_jobs_page(
     }
     where = []
     params = []
+    # Nested jobs never appear in the top-level list; they are reached by
+    # listing their parent's children.
+    if parent_job_id is None:
+        where.append("j.parent_job_id IS NULL")
+    else:
+        where.append("j.parent_job_id = ?")
+        params.append(parent_job_id)
     if status is not None:
         where.append("LOWER(j.status) = ?")
         params.append(status)
@@ -1405,6 +1429,18 @@ def management_jobs_page(
         job["_cursor_key"] = [1 if sort_value is None else 0, sort_value, job_id]
         jobs.append(job)
     return {"total": total, "items": jobs}
+
+
+def job_child_count(job_id: str) -> int:
+    with _lock:
+        row = (
+            _connection()
+            .execute(
+                "SELECT COUNT(*) FROM jobs WHERE parent_job_id = ?", (job_id,)
+            )
+            .fetchone()
+        )
+    return row[0]
 
 
 def management_job(job_id: str) -> dict | None:

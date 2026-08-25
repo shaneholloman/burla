@@ -80,7 +80,7 @@ export const JobsProvider = ({ children }: { children: React.ReactNode }) => {
     );
 };
 
-const createNewJob = (data: any): BurlaJob => ({
+export const createNewJob = (data: any): BurlaJob => ({
     id: data.job_id,
     status: String(data.status || "unknown").toUpperCase() as JobsStatus,
     user: data.user || "Unknown",
@@ -90,6 +90,8 @@ const createNewJob = (data: any): BurlaJob => ({
     function_name: typeof data.function_name === "string" ? data.function_name : "Unknown",
     started_at: data.started_at ? new Date(data.started_at) : undefined,
     ended_at: data.ended_at ? new Date(data.ended_at) : undefined,
+    parent_job_id: data.parent_job_id ?? null,
+    nested_job_count: typeof data.nested_job_count === "number" ? data.nested_job_count : 0,
 });
 
 export const useJobs = () => useContext(JobsContext);

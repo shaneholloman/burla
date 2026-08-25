@@ -5,6 +5,7 @@ import { BurlaJob, JobAncestor, JobsStatus } from "@/types/coreTypes";
 import JobCalls from "@/components/JobCalls";
 import JobUtilization from "@/components/JobUtilization";
 import { NestedJobs } from "@/components/NestedJobs";
+import { JobStructure } from "@/components/JobStructure";
 import { Button } from "@/components/ui/button";
 import { ChevronRight, PowerOff } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
@@ -54,6 +55,8 @@ const JobDetails = () => {
     const [jobDoc, setJobDoc] = useState<JobDoc | null>(null);
     // Chain of enclosing jobs (outermost first) when this job is nested.
     const [ancestors, setAncestors] = useState<JobAncestor[]>([]);
+    // Gates the Graph tab: it only exists for jobs containing nested jobs.
+    const [nestedJobCount, setNestedJobCount] = useState(0);
     // Deep links can target jobs outside the first page held by the jobs context.
     const [fetchedJob, setFetchedJob] = useState<BurlaJob | null>(null);
     const hasCompletedInitialStatsLoadRef = useRef(false);
@@ -76,10 +79,12 @@ const JobDetails = () => {
     // The call table and detail live on the first tab. A selected task wins
     // over the tab param, which also reinterprets old ?tab=utilization&task=N
     // and ?tab=calls&task=N links.
-    const activeTab: "overview" | "utilization" =
-        selectedTaskIndex == null && searchParams.get("tab") === "utilization" ? "utilization" : "overview";
+    const tabParam = searchParams.get("tab");
+    let activeTab: "overview" | "utilization" | "graph" = "overview";
+    if (selectedTaskIndex == null && tabParam === "utilization") activeTab = "utilization";
+    if (selectedTaskIndex == null && tabParam === "graph" && nestedJobCount > 0) activeTab = "graph";
 
-    const openTab = (tab: "overview" | "utilization") => {
+    const openTab = (tab: "overview" | "utilization" | "graph") => {
         const sp = new URLSearchParams(searchParams);
         if (tab === "overview") sp.delete("tab");
         else sp.set("tab", tab);
@@ -189,6 +194,7 @@ const JobDetails = () => {
         setFetchedJob(null);
         setJobEvents([]);
         setAncestors([]);
+        setNestedJobCount(0);
         hasCompletedInitialStatsLoadRef.current = false;
     }, [jobId]);
 
@@ -223,6 +229,7 @@ const JobDetails = () => {
                 });
                 setJobEvents(payload?.notices ?? []);
                 setAncestors(payload?.ancestors ?? []);
+                setNestedJobCount(payload?.nested_job_count ?? 0);
                 setFetchedJob({
                     id: jobId,
                     status: String(payload?.status || "unknown").toUpperCase() as JobsStatus,
@@ -446,6 +453,16 @@ const JobDetails = () => {
                         >
                             Utilization
                         </button>
+                        {nestedJobCount > 0 && (
+                            <button
+                                type="button"
+                                onClick={() => openTab("graph")}
+                                className={tabClass(activeTab === "graph")}
+                                aria-pressed={activeTab === "graph"}
+                            >
+                                Graph
+                            </button>
+                        )}
                     </nav>
                 </div>
 
@@ -560,9 +577,13 @@ const JobDetails = () => {
                             />
                         </div>
                     </div>
-                ) : (
+                ) : activeTab === "utilization" ? (
                     <div className="mt-5">
                         <JobUtilization jobId={job.id} jobStatus={job.status} />
+                    </div>
+                ) : (
+                    <div className="mt-5">
+                        <JobStructure key={job.id} jobId={job.id} jobStatus={job.status} />
                     </div>
                 )}
             </div>

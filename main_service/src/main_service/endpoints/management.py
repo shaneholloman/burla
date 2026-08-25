@@ -798,6 +798,73 @@ def watch_jobs(parent_job_id: str | None = None):
     )
 
 
+def _group_child_jobs(parent_ids: list[str]) -> list[dict]:
+    """The next nesting level below parent_ids, grouped by function name.
+    Groups recurse: a group's children are the (grouped) jobs spawned from
+    inside any of its member jobs. Grouping keeps huge fan-outs readable:
+    1,000 nested `train_model` jobs render as one node with a count."""
+    children = history.jobs_with_parents(parent_ids)
+    by_function: dict[str, list[dict]] = {}
+    for job in children:
+        by_function.setdefault(job["function_name"], []).append(job)
+    groups = []
+    for function_name, jobs in by_function.items():
+        status_counts: dict[str, int] = {}
+        for job in jobs:
+            status_counts[job["status"]] = status_counts.get(job["status"], 0) + 1
+        cpus = {job["func_cpu"] for job in jobs}
+        rams = {job["func_ram"] for job in jobs}
+        gpus = {job["func_gpu"] for job in jobs}
+        groups.append(
+            {
+                "function_name": function_name,
+                "job_count": len(jobs),
+                # Single-job groups link straight to that job's page.
+                "job_id": jobs[0]["job_id"] if len(jobs) == 1 else None,
+                "status_counts": status_counts,
+                "input_count": sum(job["n_inputs"] for job in jobs),
+                "result_count": sum(job["n_results"] for job in jobs),
+                "cpu_per_call": cpus.pop() if len(cpus) == 1 else "mixed",
+                "ram_per_call": rams.pop() if len(rams) == 1 else "mixed",
+                "gpu_per_call": gpus.pop() if len(gpus) == 1 else "mixed",
+                # Upper bound on this group's in-flight calls right now.
+                "running_parallelism": sum(
+                    int(job["max_parallelism"] or 0)
+                    for job in jobs
+                    if job["status"] == "running"
+                ),
+                "children": _group_child_jobs([job["job_id"] for job in jobs]),
+            }
+        )
+    return groups
+
+
+@router.get("/jobs/{job_id}/tree")
+def job_tree(job_id: str):
+    """The whole workload under one job, grouped by function name per level,
+    for the structure (graph / tree) views."""
+    root = _job_or_404(job_id)
+    return {
+        "root": {
+            "job_id": job_id,
+            "function_name": root["function_name"],
+            "status": root["status"],
+            "job_count": 1,
+            "input_count": root["input_count"],
+            "result_count": root["result_count"],
+            "cpu_per_call": root["resources_per_call"]["cpu"],
+            "ram_per_call": root["resources_per_call"]["memory_gb"],
+            "gpu_per_call": root["resources_per_call"]["gpu"],
+            "running_parallelism": (
+                int(root.get("max_parallelism") or 0)
+                if root["status"] == "running"
+                else 0
+            ),
+        },
+        "groups": _group_child_jobs([job_id]),
+    }
+
+
 @router.get("/jobs/{job_id}")
 def show_job(job_id: str):
     return _job_or_404(job_id)

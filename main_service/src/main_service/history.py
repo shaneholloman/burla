@@ -1443,6 +1443,46 @@ def job_child_count(job_id: str) -> int:
     return row[0]
 
 
+def jobs_with_parents(parent_ids: list[str]) -> list[dict]:
+    """One nesting level of the job tree: every job whose parent is in
+    parent_ids, with just the fields the structure views aggregate.
+    Chunked because SQLite caps bound parameters at 999."""
+    jobs = []
+    with _lock:
+        conn = _connection()
+        for start in range(0, len(parent_ids), 500):
+            chunk = parent_ids[start : start + 500]
+            placeholders = ",".join("?" * len(chunk))
+            rows = conn.execute(
+                "SELECT job_id, parent_job_id, function_name, status, n_inputs, "
+                "n_results, started_at, "
+                "json_extract(data, '$.func_cpu'), "
+                "json_extract(data, '$.func_ram'), "
+                "json_extract(data, '$.func_gpu'), "
+                "json_extract(data, '$.max_parallelism') "
+                f"FROM jobs WHERE parent_job_id IN ({placeholders}) "
+                "ORDER BY started_at",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                jobs.append(
+                    {
+                        "job_id": row[0],
+                        "parent_job_id": row[1],
+                        "function_name": row[2] or "Unknown",
+                        "status": (row[3] or "unknown").lower(),
+                        "n_inputs": row[4] or 0,
+                        "n_results": row[5] or 0,
+                        "started_at": row[6],
+                        "func_cpu": row[7],
+                        "func_ram": row[8],
+                        "func_gpu": row[9],
+                        "max_parallelism": row[10],
+                    }
+                )
+    return jobs
+
+
 def management_job(job_id: str) -> dict | None:
     with _lock:
         row = (

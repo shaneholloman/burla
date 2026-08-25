@@ -80,6 +80,11 @@ class LocalDockerProvider:
         # uv can hardlink prepared packages into the worker environment only
         # when both directories share a filesystem.
         worker_storage = _cluster_volume(docker_client, f"worker-storage-{port}")
+        # Per node slot, like the volumes above: nodes sharing one dir would
+        # let any node's job teardown delete every other node's creds file,
+        # which real VMs (one filesystem each) can never do.
+        node_auth_dir = f"{os.environ['HOST_PWD']}/_node_auth/{port}"
+        os.makedirs(node_auth_dir, exist_ok=True)
         host_config = docker_client.create_host_config(
             # Privileged so the node can run its own dockerd for its workers.
             privileged=True,
@@ -93,7 +98,7 @@ class LocalDockerProvider:
                 f"{os.environ['HOST_PWD']}/node_service": "/opt/burla/node_service",
                 f"{os.environ['HOST_PWD']}/_shared_workspace": "/workspace/shared",
                 # node_auth bind: see NODE_AUTH_DIR in node_service/__init__.py.
-                f"{os.environ['HOST_PWD']}/_node_auth": "/opt/burla/node_auth",
+                node_auth_dir: "/opt/burla/node_auth",
                 # Real VMs carry the client checkout at this path; workers
                 # install burla from it when their python env is empty.
                 f"{os.environ['HOST_PWD']}/client": {

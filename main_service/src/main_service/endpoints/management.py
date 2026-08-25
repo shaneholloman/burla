@@ -605,7 +605,9 @@ def _job_dto(raw: dict) -> dict:
     input_count = int(job.get("n_inputs") or 0)
     failed_count = history.job_error_count(job_id)
     status = str(job.get("status") or "unknown").lower()
-    if input_count and result_count >= input_count:
+    # Canceled is authoritative: a canceled job's workers can flush one last
+    # (error) result while dying, which would re-derive it as failed here.
+    if status != "canceled" and input_count and result_count >= input_count:
         status = "failed" if failed_count else "completed"
     started_at = job.get("started_at")
     ended_at = job.get("ended_at")

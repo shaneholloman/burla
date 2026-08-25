@@ -1,7 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { ChevronDown, ChevronRight } from "lucide-react";
-import { JobsStatus } from "@/types/coreTypes";
 import { managementJson } from "@/lib/managementApi";
 import { cn } from "@/lib/utils";
 
@@ -9,6 +7,7 @@ interface StructureNode {
     function_name: string;
     job_count: number;
     job_id: string | null;
+    contains_current?: boolean;
     status_counts: Record<string, number>;
     input_count: number;
     result_count: number;
@@ -20,7 +19,9 @@ interface StructureNode {
 }
 
 interface TreeResponse {
-    root: Omit<StructureNode, "children" | "status_counts"> & { status: string };
+    root: Omit<StructureNode, "children" | "status_counts" | "contains_current"> & {
+        status: string;
+    };
     groups: StructureNode[];
 }
 
@@ -58,8 +59,6 @@ const perCallText = (node: StructureNode): string => {
     return parts.filter(Boolean).join(" · ");
 };
 
-// ---------------------------------------------------------------- graph view
-
 const NODE_W = 250;
 const NODE_H = 98;
 const GAP_X = 72;
@@ -71,7 +70,6 @@ interface LaidOutNode {
     x: number;
     y: number;
     parent: LaidOutNode | null;
-    isRoot: boolean;
 }
 
 // Tidy tree layout: leaves stack top-to-bottom, parents center on their
@@ -80,29 +78,26 @@ interface LaidOutNode {
 const layOutTree = (root: StructureNode): LaidOutNode[] => {
     const nodes: LaidOutNode[] = [];
     let nextLeafSlot = 0;
-    const place = (
-        node: StructureNode,
-        depth: number,
-        parent: LaidOutNode | null,
-        isRoot: boolean
-    ): LaidOutNode => {
-        const laidOut: LaidOutNode = { node, depth, x: depth * (NODE_W + GAP_X), y: 0, parent, isRoot };
+    const place = (node: StructureNode, depth: number, parent: LaidOutNode | null): LaidOutNode => {
+        const laidOut: LaidOutNode = { node, depth, x: depth * (NODE_W + GAP_X), y: 0, parent };
         nodes.push(laidOut);
         if (node.children.length === 0) {
             laidOut.y = nextLeafSlot * (NODE_H + GAP_Y);
             nextLeafSlot += 1;
         } else {
-            const childYs = node.children.map((child) => place(child, depth + 1, laidOut, false).y);
+            const childYs = node.children.map((child) => place(child, depth + 1, laidOut).y);
             laidOut.y = (Math.min(...childYs) + Math.max(...childYs)) / 2;
         }
         return laidOut;
     };
-    place(root, 0, null, true);
+    place(root, 0, null);
     return nodes;
 };
 
-const GraphNodeCard = ({ laidOut }: { laidOut: LaidOutNode }) => {
-    const { node, x, y, isRoot } = laidOut;
+const GraphNodeCard = ({ laidOut, currentJobId }: { laidOut: LaidOutNode; currentJobId: string }) => {
+    const { node, x, y } = laidOut;
+    // The job whose page is showing: highlighted, not a link.
+    const isCurrent = node.job_id === currentJobId || !!node.contains_current;
     const running = (node.status_counts["running"] ?? 0) > 0;
     const resources = perCallText(node);
     const body = (
@@ -139,27 +134,26 @@ const GraphNodeCard = ({ laidOut }: { laidOut: LaidOutNode }) => {
     );
     const className = cn(
         "absolute rounded-lg border bg-card px-3.5 py-2.5 shadow-sm transition-colors",
-        isRoot ? "border-primary/50" : "border-border",
-        running && "ring-1 ring-sky-500/20",
-        node.job_id && !isRoot && "cursor-pointer hover:border-primary/60"
+        isCurrent ? "border-primary ring-1 ring-primary/30" : "border-border",
+        running && !isCurrent && "ring-1 ring-sky-500/20",
+        node.job_id && !isCurrent && "cursor-pointer hover:border-primary/60"
     );
     const style = { left: x, top: y, width: NODE_W, height: NODE_H };
-    if (node.job_id && !isRoot) {
+    if (node.job_id && !isCurrent) {
         return (
             <Link to={`/jobs/${node.job_id}`} className={className} style={style}>
                 {body}
             </Link>
         );
     }
-    const title = node.job_count > 1 ? `${node.job_count} jobs, expand them in the Tree view` : undefined;
     return (
-        <div className={className} style={style} title={title}>
+        <div className={className} style={style} title={node.job_count > 1 ? `${node.job_count} jobs` : undefined}>
             {body}
         </div>
     );
 };
 
-const StructureGraph = ({ root }: { root: StructureNode }) => {
+const StructureGraph = ({ root, currentJobId }: { root: StructureNode; currentJobId: string }) => {
     const laidOutNodes = useMemo(() => layOutTree(root), [root]);
     const width = (Math.max(...laidOutNodes.map((n) => n.depth)) + 1) * (NODE_W + GAP_X) - GAP_X;
     const height = Math.max(...laidOutNodes.map((n) => n.y)) + NODE_H;
@@ -193,91 +187,38 @@ const StructureGraph = ({ root }: { root: StructureNode }) => {
                         })}
                 </svg>
                 {laidOutNodes.map((n) => (
-                    <GraphNodeCard key={`${n.depth}-${n.node.function_name}-${n.y}`} laidOut={n} />
+                    <GraphNodeCard
+                        key={`${n.depth}-${n.node.function_name}-${n.y}`}
+                        laidOut={n}
+                        currentJobId={currentJobId}
+                    />
                 ))}
             </div>
         </div>
     );
 };
 
-// ----------------------------------------------------------------- tree view
+const hasLiveJobs = (node: StructureNode): boolean =>
+    ["running", "pending"].some((status) => node.status_counts[status]) ||
+    node.children.some(hasLiveJobs);
 
-const TreeRow = ({ node, depth, isRoot }: { node: StructureNode; depth: number; isRoot?: boolean }) => {
-    const [expanded, setExpanded] = useState(true);
-    const hasChildren = node.children.length > 0;
-    const resources = perCallText(node);
-    return (
-        <>
-            <div
-                className="flex items-center gap-2 border-b border-border/60 py-2 last:border-b-0"
-                style={{ paddingLeft: depth * 26 }}
-            >
-                {hasChildren ? (
-                    <button
-                        type="button"
-                        onClick={() => setExpanded((previous) => !previous)}
-                        className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                        aria-label={expanded ? "Collapse" : "Expand"}
-                    >
-                        {expanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-                    </button>
-                ) : (
-                    <span className="w-5 shrink-0" />
-                )}
-                {node.job_id && !isRoot ? (
-                    <Link
-                        to={`/jobs/${node.job_id}`}
-                        className="truncate font-mono text-[13px] font-medium text-foreground hover:text-primary hover:underline"
-                    >
-                        {node.function_name}
-                    </Link>
-                ) : (
-                    <span className="truncate font-mono text-[13px] font-medium text-foreground">
-                        {node.function_name}
-                    </span>
-                )}
-                {node.job_count > 1 && (
-                    <span className="shrink-0 rounded-full border border-border bg-muted/60 px-1.5 py-[1px] text-[11px] font-medium tabular-nums text-muted-foreground">
-                        ×{node.job_count.toLocaleString()}
-                    </span>
-                )}
-                <span className="ml-2 shrink-0 text-[12px] tabular-nums text-muted-foreground">
-                    {node.result_count.toLocaleString()} / {node.input_count.toLocaleString()}
-                </span>
-                <StatusDots counts={node.status_counts} />
-                <span className="ml-auto shrink-0 pl-4 text-[11px] text-muted-foreground">
-                    {resources}
-                    {node.running_parallelism > 0 && (
-                        <span className="text-sky-600 dark:text-sky-400">
-                            {resources ? " · " : ""}up to {node.running_parallelism.toLocaleString()} in flight
-                        </span>
-                    )}
-                </span>
-            </div>
-            {expanded &&
-                node.children.map((child) => (
-                    <TreeRow
-                        key={`${child.function_name}-${child.job_id ?? "group"}`}
-                        node={child}
-                        depth={depth + 1}
-                    />
-                ))}
-        </>
-    );
-};
-
-const StructureTree = ({ root }: { root: StructureNode }) => (
-    <div className="rounded-xl border border-border bg-card px-5 py-2 shadow-sm">
-        <TreeRow node={root} depth={0} isRoot />
-    </div>
-);
-
-// ------------------------------------------------------------------- wrapper
-
-export const JobStructure = ({ jobId, jobStatus }: { jobId: string; jobStatus: JobsStatus | null }) => {
+// The graph of the whole nested workload this job belongs to (always the full
+// graph from the outermost root, whichever member job's page is showing, so
+// clicking around the workload keeps the graph in place). Renders nothing for
+// jobs with no nested structure.
+export const JobStructure = ({ jobId }: { jobId: string }) => {
     const [tree, setTree] = useState<TreeResponse | null>(null);
-    const [view, setView] = useState<"graph" | "tree">("graph");
-    const isLive = jobStatus === "RUNNING" || jobStatus === "PENDING";
+
+    const root: StructureNode | null = useMemo(() => {
+        if (!tree) return null;
+        return {
+            ...tree.root,
+            status_counts: { [tree.root.status]: 1 } as Record<string, number>,
+            children: tree.groups,
+        } as StructureNode;
+    }, [tree]);
+
+    const isLive = root == null || hasLiveJobs(root);
 
     useEffect(() => {
         let cancelled = false;
@@ -298,48 +239,12 @@ export const JobStructure = ({ jobId, jobStatus }: { jobId: string; jobStatus: J
         };
     }, [jobId, isLive]);
 
-    const root: StructureNode | null = useMemo(() => {
-        if (!tree) return null;
-        return {
-            ...tree.root,
-            status_counts: { [tree.root.status]: 1 } as Record<string, number>,
-            children: tree.groups,
-        } as StructureNode;
-    }, [tree]);
-
-    if (!root) {
-        return (
-            <div className="flex justify-center py-12">
-                <div className="h-5 w-5 animate-spin rounded-full border-2 border-border border-t-primary" />
-            </div>
-        );
-    }
+    if (!root || root.children.length === 0) return null;
 
     return (
-        <div>
-            <div className="mb-3 flex items-center justify-between">
-                <div className="inline-flex rounded-lg border border-border bg-muted/40 p-0.5">
-                    {(["graph", "tree"] as const).map((option) => (
-                        <button
-                            key={option}
-                            type="button"
-                            onClick={() => setView(option)}
-                            className={cn(
-                                "rounded-md px-3 py-1 text-[13px] font-medium capitalize transition-colors",
-                                view === option
-                                    ? "bg-card text-foreground shadow-sm"
-                                    : "text-muted-foreground hover:text-foreground"
-                            )}
-                        >
-                            {option}
-                        </button>
-                    ))}
-                </div>
-                <span className="text-[12px] text-muted-foreground">
-                    Nested jobs grouped by function{isLive ? ", updating live" : ""}
-                </span>
-            </div>
-            {view === "graph" ? <StructureGraph root={root} /> : <StructureTree root={root} />}
+        <div className="mb-4">
+            <h2 className="mb-2 text-sm font-semibold text-foreground">Workload</h2>
+            <StructureGraph root={root} currentJobId={jobId} />
         </div>
     );
 };

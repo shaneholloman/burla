@@ -798,7 +798,7 @@ def watch_jobs(parent_job_id: str | None = None):
     )
 
 
-def _group_child_jobs(parent_ids: list[str]) -> list[dict]:
+def _group_child_jobs(parent_ids: list[str], current_job_id: str) -> list[dict]:
     """The next nesting level below parent_ids, grouped by function name.
     Groups recurse: a group's children are the (grouped) jobs spawned from
     inside any of its member jobs. Grouping keeps huge fan-outs readable:
@@ -821,6 +821,10 @@ def _group_child_jobs(parent_ids: list[str]) -> list[dict]:
                 "job_count": len(jobs),
                 # Single-job groups link straight to that job's page.
                 "job_id": jobs[0]["job_id"] if len(jobs) == 1 else None,
+                # "You are here" marker for the graph on nested job pages.
+                "contains_current": any(
+                    job["job_id"] == current_job_id for job in jobs
+                ),
                 "status_counts": status_counts,
                 "input_count": sum(job["n_inputs"] for job in jobs),
                 "result_count": sum(job["n_results"] for job in jobs),
@@ -833,7 +837,9 @@ def _group_child_jobs(parent_ids: list[str]) -> list[dict]:
                     for job in jobs
                     if job["status"] == "running"
                 ),
-                "children": _group_child_jobs([job["job_id"] for job in jobs]),
+                "children": _group_child_jobs(
+                    [job["job_id"] for job in jobs], current_job_id
+                ),
             }
         )
     return groups
@@ -841,12 +847,17 @@ def _group_child_jobs(parent_ids: list[str]) -> list[dict]:
 
 @router.get("/jobs/{job_id}/tree")
 def job_tree(job_id: str):
-    """The whole workload under one job, grouped by function name per level,
-    for the structure (graph / tree) views."""
-    root = _job_or_404(job_id)
+    """The whole workload the given job belongs to, from its outermost root
+    down, grouped by function name per level, for the graph view. Every member
+    job's page shows the same graph; `contains_current` marks the group holding
+    the requested job."""
+    current = _job_or_404(job_id)
+    ancestors = current["ancestors"]
+    root = _job_or_404(ancestors[0]["job_id"]) if ancestors else current
+    root_id = root["job_id"]
     return {
         "root": {
-            "job_id": job_id,
+            "job_id": root_id,
             "function_name": root["function_name"],
             "status": root["status"],
             "job_count": 1,
@@ -861,7 +872,7 @@ def job_tree(job_id: str):
                 else 0
             ),
         },
-        "groups": _group_child_jobs([job_id]),
+        "groups": _group_child_jobs([root_id], job_id),
     }
 
 

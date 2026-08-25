@@ -163,7 +163,7 @@ class RemoteParallelMapReporter:
             return
         self.spinner.text = f"Booting {number_of_booting_nodes} additional nodes ..."
 
-    async def log_job_start_telemetry(self, nodes: list, packages: dict):
+    async def log_job_start_telemetry(self, nodes: list):
         ready_nodes = [node for node in nodes if node.state == "READY"]
         number_of_nodes = len(ready_nodes) if ready_nodes else len(nodes)
         machine_type = ready_nodes[0].machine_type if ready_nodes else "unknown-machine"
@@ -180,8 +180,6 @@ class RemoteParallelMapReporter:
             f"spinner={self.spinner_enabled}, grow={self.grow}, "
         )
         message += f"max_parallelism={self.max_parallelism}, job_id={self.job_id}"
-        if packages:
-            message += f"\n---\nRequested packages: {packages}"
         await self._log_telemetry_async(message, self.session, project_id=self.project_id)
 
     def set_uploading_function_message(self, nodes: list):

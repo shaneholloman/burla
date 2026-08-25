@@ -379,9 +379,7 @@ async def _execute_job(
     elif not nodes:
         raise NoNodes("Cluster refused to boot required additional nodes ...")
 
-    job_start_telemetry_task = create_task(
-        reporter.log_job_start_telemetry(nodes, packages)
-    )
+    job_start_telemetry_task = create_task(reporter.log_job_start_telemetry(nodes))
     session_stack.callback(job_start_telemetry_task.cancel)
     reporter.set_uploading_function_message(nodes)
 

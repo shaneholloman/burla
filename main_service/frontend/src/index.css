@@ -624,3 +624,26 @@
     0 3px 6px rgba(0, 0, 0, 0.34),
     0 0 22px rgba(150, 221, 240, 0.16);
 }
+
+/* Graph canvas scrollbar: invisible until the canvas is hovered, then a slim
+   rounded thumb. Replaces the default bar, which read as page chrome. */
+.graph-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+.graph-scroll:hover {
+  scrollbar-color: hsl(var(--muted-foreground) / 0.35) transparent;
+}
+.graph-scroll::-webkit-scrollbar {
+  height: 8px;
+}
+.graph-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.graph-scroll::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 9999px;
+}
+.graph-scroll:hover::-webkit-scrollbar-thumb {
+  background: hsl(var(--muted-foreground) / 0.35);
+}

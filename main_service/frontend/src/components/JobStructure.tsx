@@ -241,7 +241,7 @@ const GraphNodeCard = ({
     );
     const clickable = isGroup || (node.job_id && !isCurrent);
     const innerClassName = cn(
-        "relative flex h-full w-full flex-col justify-center rounded-lg border bg-card px-3.5 text-left shadow-sm transition-colors",
+        "relative flex h-full w-full flex-col justify-center rounded-lg border bg-card px-3.5 text-left shadow-md transition-colors",
         isCurrent ? "border-primary ring-1 ring-primary/30" : "border-border",
         clickable && "cursor-pointer hover:border-primary/60"
     );
@@ -325,14 +325,20 @@ const StructureGraph = ({
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [layout, currentJobId]);
 
-    const legendY = 5;
     return (
         <div className="relative rounded-xl border border-border bg-card shadow-sm">
-            <div ref={scrollRef} onScroll={updateFades} className="overflow-x-auto rounded-t-xl">
+            <div
+                ref={scrollRef}
+                onScroll={updateFades}
+                className="graph-scroll overflow-x-auto rounded-xl"
+            >
+                {/* Recessed canvas: darker than the node cards in both themes
+                    so the cards float, with the dot grid kept faint. */}
                 <div
-                    className="min-w-full w-max p-6"
+                    className="min-w-full w-max bg-background/70 p-6"
                     style={{
-                        backgroundImage: "radial-gradient(hsl(var(--border)) 1px, transparent 1px)",
+                        backgroundImage:
+                            "radial-gradient(hsl(var(--border) / 0.5) 1px, transparent 1px)",
                         backgroundSize: "22px 22px",
                     }}
                 >
@@ -345,7 +351,7 @@ const StructureGraph = ({
                     {layout.regions.map((region) => (
                         <div
                             key={region.key}
-                            className="pointer-events-none absolute rounded-lg border border-border/60 bg-muted/25"
+                            className="pointer-events-none absolute rounded-lg border border-border bg-muted/40"
                             style={{
                                 left: region.x,
                                 top: region.y,
@@ -415,30 +421,6 @@ const StructureGraph = ({
             {fades.right && (
                 <div className="pointer-events-none absolute inset-y-0 right-0 w-10 rounded-r-xl bg-gradient-to-l from-card to-transparent" />
             )}
-
-            <div className="flex items-center gap-5 border-t border-border/60 px-6 py-2 text-[11px] text-muted-foreground">
-                <span className="inline-flex items-center gap-1.5">
-                    <svg width="24" height="10" aria-hidden>
-                        <line
-                            x1="0"
-                            y1={legendY}
-                            x2="18"
-                            y2={legendY}
-                            className="stroke-muted-foreground/55"
-                            strokeWidth="1.5"
-                        />
-                        <path
-                            d="M18,2 L24,5 L18,8 Z"
-                            style={{ fill: "hsl(var(--muted-foreground))", fillOpacity: 0.55 }}
-                        />
-                    </svg>
-                    next stage
-                </span>
-                <span className="inline-flex items-center gap-1.5">
-                    <span className="h-3 w-5 rounded-[4px] border border-border/70 bg-muted/25" />
-                    runs inside
-                </span>
-            </div>
         </div>
     );
 };

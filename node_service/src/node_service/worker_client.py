@@ -1610,9 +1610,23 @@ class WorkerClient:
             ],
         }
 
-        self.container = await self.docker.containers.run(
-            config=config, name=self.container_name
-        )
+        try:
+            self.container = await self.docker.containers.run(
+                config=config, name=self.container_name
+            )
+        except aiodocker.DockerContainerError as error:
+            if "got `canceled`" not in error.message:
+                raise
+            # systemd sometimes cancels a scope start during a mass worker
+            # reboot (observed in prod: one transient cancel failed the whole
+            # reboot and the node deleted itself). run() creates the named
+            # container before starting it, so the leftover must be removed
+            # or the retry 409s on the name.
+            leftover = self.docker.containers.container(error.container_id)
+            await leftover.delete(force=True)
+            self.container = await self.docker.containers.run(
+                config=config, name=self.container_name
+            )
         self.container_id = self.container.id
 
     async def _get_host_port(self):

@@ -434,7 +434,7 @@ const StructureGraph = ({
 };
 
 const PAGE_SIZE = 15;
-const CHIP_ORDER = ["running", "failed", "canceled", "completed"];
+const CHIP_ORDER = ["running", "failed", "completed"];
 
 // Right-hand drawer listing the member jobs of one grouped graph node.
 // Anchored in the URL (?group=...) so back / refresh / share all work.

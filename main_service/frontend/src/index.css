@@ -647,3 +647,18 @@
 .graph-scroll:hover::-webkit-scrollbar-thumb {
   background: hsl(var(--muted-foreground) / 0.35);
 }
+
+/* Graph surfaces. Nested regions alternate between two fixed well tones
+   (never accumulating opacity), so depth stays legible forever instead of
+   saturating darker and darker. Node cards get their own surface, lifted
+   above the wells in both themes. */
+:root {
+  --graph-node: 0 0% 100%;
+  --graph-well-1: 212 26% 93.5%;
+  --graph-well-2: 210 30% 97.5%;
+}
+.dark {
+  --graph-node: 206 34% 16%;
+  --graph-well-1: 207 38% 12%;
+  --graph-well-2: 208 42% 9%;
+}

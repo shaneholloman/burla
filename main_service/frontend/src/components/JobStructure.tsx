@@ -115,6 +115,7 @@ interface RegionRect {
     y: number;
     width: number;
     height: number;
+    depth: number;
 }
 
 interface GraphEdge {
@@ -144,7 +145,8 @@ const layOutWorkload = (root: StructureNode): GraphLayout => {
     const placeBlock = (
         node: StructureNode,
         x: number,
-        y: number
+        y: number,
+        regionDepth: number
     ): { w: number; h: number; self: PlacedNode } => {
         const self: PlacedNode = { node, x, y };
         nodes.push(self);
@@ -160,7 +162,7 @@ const layOutWorkload = (root: StructureNode): GraphLayout => {
             let cursorY = y + NODE_H + REGION_HEAD;
             let innerRight = innerX + NODE_W;
             for (const child of nested) {
-                const block = placeBlock(child, innerX, cursorY);
+                const block = placeBlock(child, innerX, cursorY, regionDepth + 1);
                 innerRight = Math.max(innerRight, innerX + block.w);
                 cursorY += block.h + ROW_GAP;
             }
@@ -171,6 +173,7 @@ const layOutWorkload = (root: StructureNode): GraphLayout => {
                 y: regionY,
                 width: innerRight + REGION_PAD_X - regionX,
                 height: cursorY - ROW_GAP + REGION_PAD_BOTTOM - regionY,
+                depth: regionDepth,
             };
             regions.push(region);
             width = Math.max(width, region.x + region.width - x);
@@ -182,7 +185,7 @@ const layOutWorkload = (root: StructureNode): GraphLayout => {
             let cursorY = y;
             let chainWidth = 0;
             for (const child of chained) {
-                const block = placeBlock(child, chainX, cursorY);
+                const block = placeBlock(child, chainX, cursorY, regionDepth);
                 edges.push({ from: self, to: block.self });
                 chainWidth = Math.max(chainWidth, block.w);
                 height = Math.max(height, cursorY + block.h - y);
@@ -194,7 +197,7 @@ const layOutWorkload = (root: StructureNode): GraphLayout => {
         return { w: width, h: height, self };
     };
 
-    const total = placeBlock(root, 0, 0);
+    const total = placeBlock(root, 0, 0, 0);
     return { nodes, regions, edges, width: total.w, height: total.h };
 };
 
@@ -241,7 +244,7 @@ const GraphNodeCard = ({
     );
     const clickable = isGroup || (node.job_id && !isCurrent);
     const innerClassName = cn(
-        "relative flex h-full w-full flex-col justify-center rounded-lg border bg-card px-3.5 text-left shadow-md transition-colors",
+        "relative flex h-full w-full flex-col justify-center rounded-lg border bg-[hsl(var(--graph-node))] px-3.5 text-left shadow-md transition-colors",
         isCurrent ? "border-primary ring-1 ring-primary/30" : "border-border",
         clickable && "cursor-pointer hover:border-primary/60"
     );
@@ -273,7 +276,7 @@ const GraphNodeCard = ({
             {isGroup && (
                 <span
                     aria-hidden
-                    className="absolute inset-0 translate-x-[5px] translate-y-[5px] rounded-lg border border-border bg-card shadow-sm"
+                    className="absolute inset-0 translate-x-[5px] translate-y-[5px] rounded-lg border border-border bg-[hsl(var(--graph-node))] shadow-sm"
                 />
             )}
             {inner}
@@ -335,10 +338,10 @@ const StructureGraph = ({
                 {/* Recessed canvas: darker than the node cards in both themes
                     so the cards float, with the dot grid kept faint. */}
                 <div
-                    className="min-w-full w-max bg-background/70 p-6"
+                    className="min-w-full w-max bg-background p-6"
                     style={{
                         backgroundImage:
-                            "radial-gradient(hsl(var(--border) / 0.5) 1px, transparent 1px)",
+                            "radial-gradient(hsl(var(--border) / 0.45) 1px, transparent 1px)",
                         backgroundSize: "22px 22px",
                     }}
                 >
@@ -351,7 +354,12 @@ const StructureGraph = ({
                     {layout.regions.map((region) => (
                         <div
                             key={region.key}
-                            className="pointer-events-none absolute rounded-lg border border-border bg-muted/40"
+                            className={cn(
+                                "pointer-events-none absolute rounded-lg border border-border",
+                                region.depth % 2 === 0
+                                    ? "bg-[hsl(var(--graph-well-1))]"
+                                    : "bg-[hsl(var(--graph-well-2))]"
+                            )}
                             style={{
                                 left: region.x,
                                 top: region.y,
@@ -416,10 +424,10 @@ const StructureGraph = ({
             </div>
 
             {fades.left && (
-                <div className="pointer-events-none absolute inset-y-0 left-0 w-10 rounded-l-xl bg-gradient-to-r from-card to-transparent" />
+                <div className="pointer-events-none absolute inset-y-0 left-0 w-10 rounded-l-xl bg-gradient-to-r from-background to-transparent" />
             )}
             {fades.right && (
-                <div className="pointer-events-none absolute inset-y-0 right-0 w-10 rounded-r-xl bg-gradient-to-l from-card to-transparent" />
+                <div className="pointer-events-none absolute inset-y-0 right-0 w-10 rounded-r-xl bg-gradient-to-l from-background to-transparent" />
             )}
         </div>
     );

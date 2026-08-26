@@ -1483,7 +1483,7 @@ def jobs_with_parents(parent_ids: list[str]) -> list[dict]:
             placeholders = ",".join("?" * len(chunk))
             rows = conn.execute(
                 "SELECT job_id, parent_job_id, function_name, status, n_inputs, "
-                "n_results, started_at, "
+                "n_results, started_at, ended_at, "
                 "json_extract(data, '$.func_cpu'), "
                 "json_extract(data, '$.func_ram'), "
                 "json_extract(data, '$.func_gpu'), "
@@ -1502,10 +1502,11 @@ def jobs_with_parents(parent_ids: list[str]) -> list[dict]:
                         "n_inputs": row[4] or 0,
                         "n_results": row[5] or 0,
                         "started_at": row[6],
-                        "func_cpu": row[7],
-                        "func_ram": row[8],
-                        "func_gpu": row[9],
-                        "max_parallelism": row[10],
+                        "ended_at": row[7],
+                        "func_cpu": row[8],
+                        "func_ram": row[9],
+                        "func_gpu": row[10],
+                        "max_parallelism": row[11],
                     }
                 )
     return jobs

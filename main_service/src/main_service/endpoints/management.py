@@ -798,16 +798,25 @@ def watch_jobs(parent_job_id: str | None = None):
     )
 
 
-def _group_child_jobs(parent_ids: list[str], current_job_id: str) -> list[dict]:
-    """The next nesting level below parent_ids, grouped by function name.
-    Groups recurse: a group's children are the (grouped) jobs spawned from
-    inside any of its member jobs. Grouping keeps huge fan-outs readable:
-    1,000 nested `train_model` jobs render as one node with a count."""
-    children = history.jobs_with_parents(parent_ids)
+# The head stamps ended_at on its ~1s state-push cadence, so a job's
+# sequential successor (which the client starts the moment results arrive)
+# can start slightly before the predecessor's recorded end. Starts inside
+# this window still count as "after".
+_ENDED_AT_STAMP_LAG_SECONDS = 1.5
+
+
+def _job_end(job: dict) -> float:
+    return job["ended_at"] if job["ended_at"] is not None else float("inf")
+
+
+def _stage_to_nodes(stage_jobs: list[dict], current_job_id: str) -> list[dict]:
+    """One parallel stage as graph nodes, grouped by function name. Grouping
+    keeps huge fan-outs readable: 1,000 parallel `train_model` jobs render as
+    one node with a count."""
     by_function: dict[str, list[dict]] = {}
-    for job in children:
+    for job in stage_jobs:
         by_function.setdefault(job["function_name"], []).append(job)
-    groups = []
+    nodes = []
     for function_name, jobs in by_function.items():
         status_counts: dict[str, int] = {}
         for job in jobs:
@@ -815,7 +824,7 @@ def _group_child_jobs(parent_ids: list[str], current_job_id: str) -> list[dict]:
         cpus = {job["func_cpu"] for job in jobs}
         rams = {job["func_ram"] for job in jobs}
         gpus = {job["func_gpu"] for job in jobs}
-        groups.append(
+        nodes.append(
             {
                 "function_name": function_name,
                 "job_count": len(jobs),
@@ -837,12 +846,58 @@ def _group_child_jobs(parent_ids: list[str], current_job_id: str) -> list[dict]:
                     for job in jobs
                     if job["status"] == "running"
                 ),
-                "children": _group_child_jobs(
-                    [job["job_id"] for job in jobs], current_job_id
+                "children": _structure_nodes(
+                    history.jobs_with_parents([job["job_id"] for job in jobs]),
+                    current_job_id,
                 ),
+                "_max_ended_at": max(_job_end(job) for job in jobs),
             }
         )
-    return groups
+    return nodes
+
+
+def _structure_nodes(jobs: list[dict], current_job_id: str) -> list[dict]:
+    """Graph nodes for one set of sibling jobs (jobs spawned from inside the
+    same enclosing job). The graph models data flow, not just parentage:
+
+    - Siblings that ran sequentially (each started after the previous stage
+      ended) are pipeline stages: each stage nests under the previous stage's
+      node, next to that node's own nested jobs.
+    - Siblings that overlapped in time are parallel branches, side by side.
+    """
+    if not jobs:
+        return []
+    jobs = sorted(
+        jobs,
+        key=lambda job: (
+            job["started_at"] is None,
+            job["started_at"] or 0,
+            job["job_id"],
+        ),
+    )
+    stages: list[list[dict]] = []
+    stage_end = 0.0
+    for job in jobs:
+        sequential = (
+            job["started_at"] is not None
+            and job["started_at"] >= stage_end - _ENDED_AT_STAMP_LAG_SECONDS
+        )
+        if not stages or sequential:
+            stages.append([job])
+            stage_end = _job_end(job)
+        else:
+            stages[-1].append(job)
+            stage_end = max(stage_end, _job_end(job))
+    stage_nodes = [_stage_to_nodes(stage, current_job_id) for stage in stages]
+    # Each later stage consumed the previous stage's output, so it nests under
+    # the previous stage's last-finishing node.
+    for prev_nodes, next_nodes in zip(stage_nodes, stage_nodes[1:]):
+        anchor = max(prev_nodes, key=lambda node: node["_max_ended_at"])
+        anchor["children"].extend(next_nodes)
+    for nodes in stage_nodes:
+        for node in nodes:
+            del node["_max_ended_at"]
+    return stage_nodes[0]
 
 
 @router.get("/jobs/{job_id}/tree")
@@ -872,7 +927,9 @@ def job_tree(job_id: str):
                 else 0
             ),
         },
-        "groups": _group_child_jobs([root_id], job_id),
+        "groups": _structure_nodes(
+            history.jobs_with_parents([root_id]), job_id
+        ),
     }
 
 

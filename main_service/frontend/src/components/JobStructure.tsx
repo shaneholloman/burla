@@ -92,79 +92,122 @@ const formatDuration = (seconds: number | null): string => {
 
 const NODE_W = 220;
 const NODE_H = 70;
-const GAP_X = 56;
-const GAP_Y = 20;
+const GAP_X = 48;
+const GAP_Y = 18;
+// Containment region geometry: the parent card overlaps the region's top edge
+// like a tab on a folder, and the interior sits inset within the region.
+const REGION_INDENT = 16;
+const REGION_PAD_X = 12;
+const REGION_HEAD = 18;
+const REGION_PAD_BOTTOM = 12;
+const TAB_OVERLAP = 10;
+const ROW_GAP = 14;
 
-interface LaidOutNode {
+interface PlacedNode {
     node: StructureNode;
-    depth: number;
-    row: number;
     x: number;
     y: number;
-    parent: LaidOutNode | null;
 }
 
-// Column-sweep layout. A node's first child continues its row (the API puts
-// the pipeline continuation first), so a chain of sequential stages renders
-// as one straight line. Every other child is a branch, packed onto the first
-// row below its parent that is still empty from its column onward, so
-// branches sit tight under their junction with no blank rows. Deterministic,
-// so polling re-renders never shift the layout unless the structure changed.
-const layOutTree = (root: StructureNode): LaidOutNode[] => {
-    const laid: LaidOutNode[] = [];
-    const rightmostByRow: number[] = [];
-    const branchesByCol: { node: StructureNode; parent: LaidOutNode }[][] = [];
-    let maxCol = 0;
+interface RegionRect {
+    key: string;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+}
 
-    const spineEnd = (node: StructureNode, col: number): number =>
-        node.children.length === 0 ? col : spineEnd(node.children[0], col + 1);
+interface GraphEdge {
+    from: PlacedNode;
+    to: PlacedNode;
+}
 
-    const placeSpine = (node: StructureNode, col: number, row: number, parent: LaidOutNode | null) => {
-        const laidOut: LaidOutNode = {
-            node,
-            depth: col,
-            row,
-            x: col * (NODE_W + GAP_X),
-            y: row * (NODE_H + GAP_Y),
-            parent,
-        };
-        laid.push(laidOut);
-        maxCol = Math.max(maxCol, col);
-        rightmostByRow[row] = Math.max(rightmostByRow[row] ?? -1, col);
-        node.children.forEach((child, index) => {
-            if (index === 0) {
-                placeSpine(child, col + 1, row, laidOut);
-            } else {
-                (branchesByCol[col + 1] ??= []).push({ node: child, parent: laidOut });
+interface GraphLayout {
+    nodes: PlacedNode[];
+    regions: RegionRect[];
+    edges: GraphEdge[];
+    width: number;
+    height: number;
+}
+
+// Recursive block layout that draws containment as space, not edges: a node
+// with nested jobs grows a tinted region hanging off its underside and its
+// nested constellation renders inside it (recursively), while chained
+// next-stage nodes continue to the right of the node's whole block, connected
+// by flow arrows. Deterministic, so polling re-renders never shift the layout
+// unless the structure itself changed.
+const layOutWorkload = (root: StructureNode): GraphLayout => {
+    const nodes: PlacedNode[] = [];
+    const regions: RegionRect[] = [];
+    const edges: GraphEdge[] = [];
+
+    const placeBlock = (
+        node: StructureNode,
+        x: number,
+        y: number
+    ): { w: number; h: number; self: PlacedNode } => {
+        const self: PlacedNode = { node, x, y };
+        nodes.push(self);
+        let width = NODE_W;
+        let height = NODE_H;
+
+        const nested = node.children.filter((child) => !child.chained);
+        const chained = node.children.filter((child) => child.chained);
+
+        if (nested.length > 0) {
+            const regionX = x + REGION_INDENT;
+            const innerX = regionX + REGION_PAD_X;
+            let cursorY = y + NODE_H + REGION_HEAD;
+            let innerRight = innerX + NODE_W;
+            for (const child of nested) {
+                const block = placeBlock(child, innerX, cursorY);
+                innerRight = Math.max(innerRight, innerX + block.w);
+                cursorY += block.h + ROW_GAP;
             }
-        });
+            const regionY = y + NODE_H - TAB_OVERLAP;
+            const region: RegionRect = {
+                key: node.group_path ?? "root",
+                x: regionX,
+                y: regionY,
+                width: innerRight + REGION_PAD_X - regionX,
+                height: cursorY - ROW_GAP + REGION_PAD_BOTTOM - regionY,
+            };
+            regions.push(region);
+            width = Math.max(width, region.x + region.width - x);
+            height = Math.max(height, region.y + region.height - y);
+        }
+
+        if (chained.length > 0) {
+            const chainX = x + width + GAP_X;
+            let cursorY = y;
+            let chainWidth = 0;
+            for (const child of chained) {
+                const block = placeBlock(child, chainX, cursorY);
+                edges.push({ from: self, to: block.self });
+                chainWidth = Math.max(chainWidth, block.w);
+                height = Math.max(height, cursorY + block.h - y);
+                cursorY += block.h + GAP_Y;
+            }
+            width += GAP_X + chainWidth;
+        }
+
+        return { w: width, h: height, self };
     };
 
-    placeSpine(root, 0, 0, null);
-    // Left-to-right so a branch never steals a row from anything to its left.
-    for (let col = 1; col <= maxCol; col++) {
-        for (const { node, parent } of branchesByCol[col] ?? []) {
-            let row = parent.row + 1;
-            while ((rightmostByRow[row] ?? -1) >= col) row += 1;
-            // Reserve the branch's whole continuation line up front so later
-            // branches can't be packed into the middle of it.
-            rightmostByRow[row] = spineEnd(node, col);
-            placeSpine(node, col, row, parent);
-        }
-    }
-    return laid;
+    const total = placeBlock(root, 0, 0);
+    return { nodes, regions, edges, width: total.w, height: total.h };
 };
 
 const GraphNodeCard = ({
-    laidOut,
+    placed,
     currentJobId,
     onOpenGroup,
 }: {
-    laidOut: LaidOutNode;
+    placed: PlacedNode;
     currentJobId: string;
     onOpenGroup: (node: StructureNode) => void;
 }) => {
-    const { node, x, y } = laidOut;
+    const { node, x, y } = placed;
     // The job whose page is showing: highlighted, not a link.
     const isCurrent = node.job_id === currentJobId || !!node.contains_current;
     const isGroup = node.job_count > 1;
@@ -251,9 +294,7 @@ const StructureGraph = ({
     currentJobId: string;
     onOpenGroup: (node: StructureNode) => void;
 }) => {
-    const laidOutNodes = useMemo(() => layOutTree(root), [root]);
-    const width = (Math.max(...laidOutNodes.map((n) => n.depth)) + 1) * (NODE_W + GAP_X) - GAP_X;
-    const height = Math.max(...laidOutNodes.map((n) => n.y)) + NODE_H;
+    const layout = useMemo(() => layOutWorkload(root), [root]);
 
     const scrollRef = useRef<HTMLDivElement>(null);
     const hasCenteredRef = useRef(false);
@@ -273,7 +314,7 @@ const StructureGraph = ({
         const el = scrollRef.current;
         if (el && !hasCenteredRef.current) {
             hasCenteredRef.current = true;
-            const current = laidOutNodes.find(
+            const current = layout.nodes.find(
                 (n) => n.node.job_id === currentJobId || n.node.contains_current
             );
             if (current) {
@@ -282,7 +323,7 @@ const StructureGraph = ({
         }
         updateFades();
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [laidOutNodes, currentJobId]);
+    }, [layout, currentJobId]);
 
     const legendY = 5;
     return (
@@ -295,13 +336,34 @@ const StructureGraph = ({
                         backgroundSize: "22px 22px",
                     }}
                 >
-                    <div className="relative" style={{ width, height }}>
-                    <svg width={width} height={height} className="absolute inset-0 overflow-visible">
+                    <div className="relative" style={{ width: layout.width, height: layout.height }}>
+                    {/* Containment regions: everything inside a region runs
+                        inside the job card sitting on its top edge. Painted
+                        first so edges and cards render above; deeper regions
+                        paint later, so nesting reads as a slightly deeper
+                        tint. */}
+                    {layout.regions.map((region) => (
+                        <div
+                            key={region.key}
+                            className="pointer-events-none absolute rounded-lg border border-border/60 bg-muted/25"
+                            style={{
+                                left: region.x,
+                                top: region.y,
+                                width: region.width,
+                                height: region.height,
+                            }}
+                        />
+                    ))}
+                    <svg
+                        width={layout.width}
+                        height={layout.height}
+                        className="absolute inset-0 overflow-visible"
+                    >
                         <defs>
                             {/* refX=0 anchors the BACK of the head at the line's
                                 end, so the shaft meets the arrowhead. */}
                             <marker
-                                id="arrow-chained"
+                                id="arrow-flow"
                                 markerWidth="6"
                                 markerHeight="6"
                                 refX="0"
@@ -314,56 +376,31 @@ const StructureGraph = ({
                                     style={{ fill: "hsl(var(--muted-foreground))", fillOpacity: 0.55 }}
                                 />
                             </marker>
-                            <marker
-                                id="arrow-nested"
-                                markerWidth="6"
-                                markerHeight="6"
-                                refX="0"
-                                refY="3"
-                                orient="auto"
-                                markerUnits="userSpaceOnUse"
-                            >
-                                <path
-                                    d="M0,0 L6,3 L0,6 Z"
-                                    style={{ fill: "hsl(var(--muted-foreground))", fillOpacity: 0.4 }}
-                                />
-                            </marker>
                         </defs>
-                        {laidOutNodes
-                            .filter((n) => n.parent)
-                            .map((n) => {
-                                const sameRow = n.row === n.parent!.row;
-                                // Flow runs left to right out of the node's side;
-                                // containment drops out of the node's bottom.
-                                const from = sameRow
-                                    ? { x: n.parent!.x + NODE_W, y: n.parent!.y + NODE_H / 2 }
-                                    : { x: n.parent!.x + NODE_W / 2, y: n.parent!.y + NODE_H };
-                                const to = { x: n.x - EDGE_INSET, y: n.y + NODE_H / 2 };
-                                const path = sameRow
-                                    ? `M ${from.x} ${from.y} L ${to.x} ${to.y}`
-                                    : `M ${from.x} ${from.y} C ${from.x} ${to.y}, ${from.x} ${to.y}, ${to.x} ${to.y}`;
-                                const chained = n.node.chained;
-                                return (
-                                    <path
-                                        key={`${n.depth}-${n.node.function_name}-${n.y}`}
-                                        d={path}
-                                        fill="none"
-                                        className={
-                                            chained
-                                                ? "stroke-muted-foreground/55"
-                                                : "stroke-muted-foreground/40"
-                                        }
-                                        strokeWidth={1.5}
-                                        strokeDasharray={chained ? undefined : "4 3"}
-                                        markerEnd={`url(#arrow-${chained ? "chained" : "nested"})`}
-                                    />
-                                );
-                            })}
+                        {layout.edges.map(({ from, to }) => {
+                            const start = { x: from.x + NODE_W, y: from.y + NODE_H / 2 };
+                            const end = { x: to.x - EDGE_INSET, y: to.y + NODE_H / 2 };
+                            const midX = (start.x + end.x) / 2;
+                            const path =
+                                start.y === end.y
+                                    ? `M ${start.x} ${start.y} L ${end.x} ${end.y}`
+                                    : `M ${start.x} ${start.y} C ${midX} ${start.y}, ${midX} ${end.y}, ${end.x} ${end.y}`;
+                            return (
+                                <path
+                                    key={to.node.group_path}
+                                    d={path}
+                                    fill="none"
+                                    className="stroke-muted-foreground/55"
+                                    strokeWidth={1.5}
+                                    markerEnd="url(#arrow-flow)"
+                                />
+                            );
+                        })}
                     </svg>
-                    {laidOutNodes.map((n) => (
+                    {layout.nodes.map((placed) => (
                         <GraphNodeCard
-                            key={`${n.depth}-${n.node.function_name}-${n.y}`}
-                            laidOut={n}
+                            key={placed.node.group_path ?? "root"}
+                            placed={placed}
                             currentJobId={currentJobId}
                             onOpenGroup={onOpenGroup}
                         />
@@ -398,22 +435,8 @@ const StructureGraph = ({
                     next stage
                 </span>
                 <span className="inline-flex items-center gap-1.5">
-                    <svg width="24" height="10" aria-hidden>
-                        <line
-                            x1="0"
-                            y1={legendY}
-                            x2="18"
-                            y2={legendY}
-                            className="stroke-muted-foreground/40"
-                            strokeWidth="1.5"
-                            strokeDasharray="4 3"
-                        />
-                        <path
-                            d="M18,2 L24,5 L18,8 Z"
-                            style={{ fill: "hsl(var(--muted-foreground))", fillOpacity: 0.4 }}
-                        />
-                    </svg>
-                    nested inside
+                    <span className="h-3 w-5 rounded-[4px] border border-border/70 bg-muted/25" />
+                    runs inside
                 </span>
             </div>
         </div>

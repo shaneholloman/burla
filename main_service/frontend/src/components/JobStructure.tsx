@@ -98,7 +98,7 @@ const GAP_Y = 18;
 // like a tab on a folder, and the interior sits inset within the region.
 const REGION_INDENT = 16;
 const REGION_PAD_X = 12;
-const REGION_HEAD = 18;
+const REGION_HEAD = 20;
 const REGION_PAD_BOTTOM = 12;
 const TAB_OVERLAP = 10;
 const ROW_GAP = 14;
@@ -341,7 +341,7 @@ const StructureGraph = ({
                     className="min-w-full w-max bg-background p-6"
                     style={{
                         backgroundImage:
-                            "radial-gradient(hsl(var(--border) / 0.45) 1px, transparent 1px)",
+                            "radial-gradient(hsl(var(--border) / 0.7) 1px, transparent 1px)",
                         backgroundSize: "22px 22px",
                     }}
                 >
@@ -351,11 +351,14 @@ const StructureGraph = ({
                         first so edges and cards render above; deeper regions
                         paint later, so nesting reads as a slightly deeper
                         tint. */}
-                    {layout.regions.map((region) => (
+                    {/* Shallow regions first: fills are opaque, so an outer
+                        region painted later would hide the wells nested
+                        inside it. */}
+                    {[...layout.regions].sort((a, b) => a.depth - b.depth).map((region) => (
                         <div
                             key={region.key}
                             className={cn(
-                                "pointer-events-none absolute rounded-lg border border-border",
+                                "pointer-events-none absolute rounded-lg border border-muted-foreground/50",
                                 region.depth % 2 === 0
                                     ? "bg-[hsl(var(--graph-well-1))]"
                                     : "bg-[hsl(var(--graph-well-2))]"

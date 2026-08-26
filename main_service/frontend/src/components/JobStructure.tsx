@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { ChevronRight, ListTree, X } from "lucide-react";
 import { managementJson } from "@/lib/managementApi";
@@ -356,11 +356,22 @@ const interpolateLayout = (
 ): GraphLayout => {
     if (geoT >= 1 && fadeT >= 1) return to;
     const lerp = (a: number, b: number) => a + (b - a) * geoT;
+    // An item caught mid-fade when the tween retargets (fresh tree data) must
+    // keep fading from where it was, never pop to full opacity.
+    const carryOpacity = (previous: { opacity?: number }) =>
+        previous.opacity != null && previous.opacity < 1
+            ? Math.max(previous.opacity, fadeT)
+            : undefined;
     const fromNodes = new Map(from.nodes.map((p) => [nodeKey(p), p]));
     const nodes = to.nodes.map((placed) => {
         const previous = fromNodes.get(nodeKey(placed));
         return previous
-            ? { ...placed, x: lerp(previous.x, placed.x), y: lerp(previous.y, placed.y) }
+            ? {
+                  ...placed,
+                  x: lerp(previous.x, placed.x),
+                  y: lerp(previous.y, placed.y),
+                  opacity: carryOpacity(previous),
+              }
             : { ...placed, opacity: fadeT };
     });
     const byKey = new Map(nodes.map((placed) => [nodeKey(placed), placed]));
@@ -378,6 +389,7 @@ const interpolateLayout = (
                   y: lerp(previous.y, region.y),
                   width: lerp(previous.width, region.width),
                   height: lerp(previous.height, region.height),
+                  opacity: carryOpacity(previous),
               }
             : { ...region, opacity: fadeT };
     });
@@ -430,6 +442,13 @@ const StructureGraph = ({
         layoutRef.current = layout;
     }, [layout]);
     const frameRef = useRef<number>();
+    const pendingScrollRef = useRef<number | null>(null);
+    useLayoutEffect(() => {
+        if (pendingScrollRef.current != null && scrollRef.current) {
+            scrollRef.current.scrollLeft = pendingScrollRef.current;
+            pendingScrollRef.current = null;
+        }
+    }, [layout]);
     useEffect(() => {
         const from = layoutRef.current;
         if (layoutSignature(from) === layoutSignature(target)) {
@@ -476,14 +495,18 @@ const StructureGraph = ({
                 elapsed <= LAYOUT_ANIMATION_MS
                     ? 0
                     : Math.min(1, (elapsed - LAYOUT_ANIMATION_MS) / 180);
-            setLayout(interpolateLayout(from, target, geoT, fadeT));
+            // Queue the counter-scroll so the layout effect applies it in the
+            // SAME commit as the interpolated positions: setting scrollLeft
+            // here directly would lead the (async) React render by a frame
+            // and make the pinned card shimmy.
             if (el && anchorPin && anchorTo && anchorFrom) {
                 const anchorX = anchorFrom.x + (anchorTo.x - anchorFrom.x) * geoT;
                 const viewportX =
                     anchorPin.fromViewportX +
                     (anchorPin.toViewportX - anchorPin.fromViewportX) * geoT;
-                el.scrollLeft = Math.max(0, anchorX + CANVAS_PAD - viewportX);
+                pendingScrollRef.current = Math.max(0, anchorX + CANVAS_PAD - viewportX);
             }
+            setLayout(interpolateLayout(from, target, geoT, fadeT));
             if (elapsed < LAYOUT_ANIMATION_MS + 180) {
                 frameRef.current = requestAnimationFrame(step);
                 return;

@@ -464,7 +464,15 @@ TASK_SUMMARY_SORT_COLUMNS = {
     "ended": "started + duration",
     "duration": "duration",
     "attempts": "attempts",
-    "status": "failed",
+    "status": """CASE api_status
+        WHEN 'failed' THEN 0
+        WHEN 'running' THEN 1
+        WHEN 'pending' THEN 2
+        WHEN 'canceled' THEN 3
+        WHEN 'not_run' THEN 4
+        WHEN 'unknown' THEN 5
+        WHEN 'succeeded' THEN 6
+    END""",
     "peak_cpus": "peak_cpus",
     "peak_mem": "peak_mem",
 }

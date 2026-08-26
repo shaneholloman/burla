@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { X } from "lucide-react";
+import { ChevronRight, X } from "lucide-react";
 import { managementJson } from "@/lib/managementApi";
 import { StatusBadge, jobStatusBadge } from "@/components/StatusBadge";
 import { TablePagination } from "@/components/TablePagination";
+import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 
 interface StructureNode {
@@ -11,6 +12,7 @@ interface StructureNode {
     job_count: number;
     job_id: string | null;
     group_path: string;
+    chained: boolean;
     contains_current?: boolean;
     status_counts: Record<string, number>;
     input_count: number;
@@ -23,9 +25,10 @@ interface StructureNode {
 }
 
 interface TreeResponse {
-    root: Omit<StructureNode, "children" | "status_counts" | "contains_current" | "group_path"> & {
-        status: string;
-    };
+    root: Omit<
+        StructureNode,
+        "children" | "status_counts" | "contains_current" | "group_path" | "chained"
+    > & { status: string };
     groups: StructureNode[];
 }
 
@@ -45,7 +48,7 @@ interface GroupMembersResponse {
 }
 
 const STATUS_DOTS: { status: string; className: string; pulse?: boolean }[] = [
-    { status: "running", className: "bg-sky-500", pulse: true },
+    { status: "running", className: "bg-primary", pulse: true },
     { status: "completed", className: "bg-emerald-500 dark:bg-emerald-400" },
     { status: "failed", className: "bg-destructive" },
     { status: "canceled", className: "bg-muted-foreground/60" },
@@ -87,9 +90,9 @@ const formatDuration = (seconds: number | null): string => {
     return `${Math.floor(m / 60)}h ${m % 60}m`;
 };
 
-const NODE_W = 250;
-const NODE_H = 98;
-const GAP_X = 72;
+const NODE_W = 220;
+const NODE_H = 70;
+const GAP_X = 56;
 const GAP_Y = 20;
 
 interface LaidOutNode {
@@ -165,15 +168,11 @@ const GraphNodeCard = ({
     // The job whose page is showing: highlighted, not a link.
     const isCurrent = node.job_id === currentJobId || !!node.contains_current;
     const isGroup = node.job_count > 1;
-    const running = (node.status_counts["running"] ?? 0) > 0;
     const resources = perCallText(node);
     const body = (
         <>
             <div className="flex items-center gap-2">
-                <span
-                    title={node.function_name}
-                    className="truncate font-mono text-[13px] font-medium text-foreground"
-                >
+                <span className="truncate font-mono text-[13px] font-medium text-foreground">
                     {node.function_name}
                 </span>
                 {isGroup && (
@@ -183,56 +182,62 @@ const GraphNodeCard = ({
                 )}
             </div>
             <div className="mt-1.5 flex items-center justify-between gap-2">
-                <span className="text-[12px] tabular-nums text-foreground">
+                <span className="min-w-0 truncate text-[12px] tabular-nums text-foreground">
                     {node.result_count.toLocaleString()}
                     <span className="text-muted-foreground"> / {node.input_count.toLocaleString()} calls</span>
+                    {node.running_parallelism > 0 && (
+                        <span className="text-primary">
+                            {" "}
+                            · {node.running_parallelism.toLocaleString()} in flight
+                        </span>
+                    )}
                 </span>
                 <StatusDots counts={node.status_counts} />
-            </div>
-            <div className="mt-1 truncate text-[11px] text-muted-foreground">
-                {resources}
-                {node.running_parallelism > 0 && (
-                    <span className="text-sky-600 dark:text-sky-400">
-                        {resources ? " · " : ""}up to {node.running_parallelism.toLocaleString()} in flight
-                    </span>
-                )}
             </div>
         </>
     );
     const clickable = isGroup || (node.job_id && !isCurrent);
-    const className = cn(
-        "absolute rounded-lg border bg-card px-3.5 py-2.5 text-left shadow-sm transition-colors",
+    const innerClassName = cn(
+        "relative flex h-full w-full flex-col justify-center rounded-lg border bg-card px-3.5 text-left shadow-sm transition-colors",
         isCurrent ? "border-primary ring-1 ring-primary/30" : "border-border",
-        running && !isCurrent && "ring-1 ring-sky-500/20",
         clickable && "cursor-pointer hover:border-primary/60"
     );
-    const style = { left: x, top: y, width: NODE_W, height: NODE_H };
-    if (isGroup) {
-        return (
-            <button
-                type="button"
-                onClick={() => onOpenGroup(node)}
-                title={`View ${node.job_count.toLocaleString()} jobs`}
-                className={className}
-                style={style}
-            >
-                {body}
-            </button>
-        );
-    }
-    if (node.job_id && !isCurrent) {
-        return (
-            <Link to={`/jobs/${node.job_id}`} className={className} style={style}>
-                {body}
-            </Link>
-        );
-    }
-    return (
-        <div className={className} style={style}>
+    const title = [
+        isGroup ? `View ${node.job_count.toLocaleString()} jobs` : node.function_name,
+        resources,
+    ]
+        .filter(Boolean)
+        .join("\n");
+    const inner = isGroup ? (
+        <button type="button" onClick={() => onOpenGroup(node)} className={innerClassName}>
             {body}
+        </button>
+    ) : node.job_id && !isCurrent ? (
+        <Link to={`/jobs/${node.job_id}`} className={innerClassName}>
+            {body}
+        </Link>
+    ) : (
+        <div className={innerClassName}>{body}</div>
+    );
+    return (
+        <div
+            className="absolute"
+            style={{ left: x, top: y, width: NODE_W, height: NODE_H }}
+            title={title}
+        >
+            {/* Stacked-card lip: a group of jobs looks like a pile, not one job. */}
+            {isGroup && (
+                <span
+                    aria-hidden
+                    className="absolute inset-x-2 -bottom-[5px] h-4 rounded-lg border border-border bg-card"
+                />
+            )}
+            {inner}
         </div>
     );
 };
+
+const EDGE_INSET = 5;
 
 const StructureGraph = ({
     root,
@@ -246,43 +251,156 @@ const StructureGraph = ({
     const laidOutNodes = useMemo(() => layOutTree(root), [root]);
     const width = (Math.max(...laidOutNodes.map((n) => n.depth)) + 1) * (NODE_W + GAP_X) - GAP_X;
     const height = Math.max(...laidOutNodes.map((n) => n.y)) + NODE_H;
+
+    const scrollRef = useRef<HTMLDivElement>(null);
+    const hasCenteredRef = useRef(false);
+    const [fades, setFades] = useState({ left: false, right: false });
+    const updateFades = () => {
+        const el = scrollRef.current;
+        if (!el) return;
+        setFades({
+            left: el.scrollLeft > 1,
+            right: el.scrollLeft + el.clientWidth < el.scrollWidth - 1,
+        });
+    };
+
+    // Center "you are here" on first render only: later navigation within the
+    // workload keeps whatever scroll position the user has.
+    useEffect(() => {
+        const el = scrollRef.current;
+        if (el && !hasCenteredRef.current) {
+            hasCenteredRef.current = true;
+            const current = laidOutNodes.find(
+                (n) => n.node.job_id === currentJobId || n.node.contains_current
+            );
+            if (current) {
+                el.scrollLeft = Math.max(0, current.x - (el.clientWidth - NODE_W) / 2);
+            }
+        }
+        updateFades();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [laidOutNodes, currentJobId]);
+
+    const legendY = 5;
     return (
-        <div className="overflow-x-auto rounded-xl border border-border bg-card p-6 shadow-sm">
-            <div
-                className="relative"
-                style={{
-                    width,
-                    height,
-                    backgroundImage: "radial-gradient(hsl(var(--border)) 1px, transparent 1px)",
-                    backgroundSize: "22px 22px",
-                }}
-            >
-                <svg width={width} height={height} className="absolute inset-0">
-                    {laidOutNodes
-                        .filter((n) => n.parent)
-                        .map((n) => {
-                            const from = { x: n.parent!.x + NODE_W, y: n.parent!.y + NODE_H / 2 };
-                            const to = { x: n.x, y: n.y + NODE_H / 2 };
-                            const midX = (from.x + to.x) / 2;
-                            return (
+        <div className="relative rounded-xl border border-border bg-card shadow-sm">
+            <div ref={scrollRef} onScroll={updateFades} className="overflow-x-auto p-6">
+                <div
+                    className="relative"
+                    style={{
+                        width,
+                        height,
+                        backgroundImage: "radial-gradient(hsl(var(--border)) 1px, transparent 1px)",
+                        backgroundSize: "22px 22px",
+                    }}
+                >
+                    <svg width={width} height={height} className="absolute inset-0">
+                        <defs>
+                            <marker
+                                id="arrow-chained"
+                                markerWidth="6"
+                                markerHeight="6"
+                                refX="5"
+                                refY="3"
+                                orient="auto"
+                            >
                                 <path
-                                    key={`${n.depth}-${n.node.function_name}-${n.y}`}
-                                    d={`M ${from.x} ${from.y} C ${midX} ${from.y}, ${midX} ${to.y}, ${to.x} ${to.y}`}
-                                    fill="none"
-                                    className="stroke-muted-foreground/40"
-                                    strokeWidth={1.5}
+                                    d="M0,0 L6,3 L0,6 Z"
+                                    style={{ fill: "hsl(var(--muted-foreground))", fillOpacity: 0.55 }}
                                 />
-                            );
-                        })}
-                </svg>
-                {laidOutNodes.map((n) => (
-                    <GraphNodeCard
-                        key={`${n.depth}-${n.node.function_name}-${n.y}`}
-                        laidOut={n}
-                        currentJobId={currentJobId}
-                        onOpenGroup={onOpenGroup}
-                    />
-                ))}
+                            </marker>
+                            <marker
+                                id="arrow-nested"
+                                markerWidth="6"
+                                markerHeight="6"
+                                refX="5"
+                                refY="3"
+                                orient="auto"
+                            >
+                                <path
+                                    d="M0,0 L6,3 L0,6 Z"
+                                    style={{ fill: "hsl(var(--muted-foreground))", fillOpacity: 0.4 }}
+                                />
+                            </marker>
+                        </defs>
+                        {laidOutNodes
+                            .filter((n) => n.parent)
+                            .map((n) => {
+                                const from = { x: n.parent!.x + NODE_W, y: n.parent!.y + NODE_H / 2 };
+                                const to = { x: n.x - EDGE_INSET, y: n.y + NODE_H / 2 };
+                                const midX = (from.x + to.x) / 2;
+                                const chained = n.node.chained;
+                                return (
+                                    <path
+                                        key={`${n.depth}-${n.node.function_name}-${n.y}`}
+                                        d={`M ${from.x} ${from.y} C ${midX} ${from.y}, ${midX} ${to.y}, ${to.x} ${to.y}`}
+                                        fill="none"
+                                        className={
+                                            chained
+                                                ? "stroke-muted-foreground/55"
+                                                : "stroke-muted-foreground/40"
+                                        }
+                                        strokeWidth={1.5}
+                                        strokeDasharray={chained ? undefined : "4 3"}
+                                        markerEnd={`url(#arrow-${chained ? "chained" : "nested"})`}
+                                    />
+                                );
+                            })}
+                    </svg>
+                    {laidOutNodes.map((n) => (
+                        <GraphNodeCard
+                            key={`${n.depth}-${n.node.function_name}-${n.y}`}
+                            laidOut={n}
+                            currentJobId={currentJobId}
+                            onOpenGroup={onOpenGroup}
+                        />
+                    ))}
+                </div>
+            </div>
+
+            {fades.left && (
+                <div className="pointer-events-none absolute inset-y-0 left-0 w-10 rounded-l-xl bg-gradient-to-r from-card to-transparent" />
+            )}
+            {fades.right && (
+                <div className="pointer-events-none absolute inset-y-0 right-0 w-10 rounded-r-xl bg-gradient-to-l from-card to-transparent" />
+            )}
+
+            <div className="flex items-center gap-5 border-t border-border/60 px-6 py-2 text-[11px] text-muted-foreground">
+                <span className="inline-flex items-center gap-1.5">
+                    <svg width="24" height="10" aria-hidden>
+                        <line
+                            x1="0"
+                            y1={legendY}
+                            x2="18"
+                            y2={legendY}
+                            className="stroke-muted-foreground/55"
+                            strokeWidth="1.5"
+                        />
+                        <path
+                            d="M18,2 L24,5 L18,8 Z"
+                            style={{ fill: "hsl(var(--muted-foreground))", fillOpacity: 0.55 }}
+                        />
+                    </svg>
+                    next stage
+                </span>
+                <span className="inline-flex items-center gap-1.5">
+                    <svg width="24" height="10" aria-hidden>
+                        <line
+                            x1="0"
+                            y1={legendY}
+                            x2="18"
+                            y2={legendY}
+                            className="stroke-muted-foreground/40"
+                            strokeWidth="1.5"
+                            strokeDasharray="4 3"
+                        />
+                        <path
+                            d="M18,2 L24,5 L18,8 Z"
+                            style={{ fill: "hsl(var(--muted-foreground))", fillOpacity: 0.4 }}
+                        />
+                    </svg>
+                    nested inside
+                </span>
             </div>
         </div>
     );
@@ -307,7 +425,14 @@ const GroupDrawer = ({
     const navigate = useNavigate();
     const [statusFilter, setStatusFilter] = useState<string | null>(null);
     const [page, setPage] = useState(0);
+    const [searchTerm, setSearchTerm] = useState("");
+    const [debouncedSearch, setDebouncedSearch] = useState("");
     const [data, setData] = useState<GroupMembersResponse | null>(null);
+
+    useEffect(() => {
+        const id = window.setTimeout(() => setDebouncedSearch(searchTerm.trim()), 250);
+        return () => window.clearTimeout(id);
+    }, [searchTerm]);
 
     useEffect(() => {
         let cancelled = false;
@@ -319,6 +444,7 @@ const GroupDrawer = ({
                     limit: String(PAGE_SIZE),
                 });
                 if (statusFilter) query.set("status", statusFilter);
+                if (debouncedSearch) query.set("search", debouncedSearch);
                 const response = await managementJson<GroupMembersResponse>(
                     `/jobs/${jobId}/tree/members?${query}`
                 );
@@ -334,7 +460,7 @@ const GroupDrawer = ({
             cancelled = true;
             window.clearInterval(id);
         };
-    }, [node.group_path, jobId, statusFilter, page, live]);
+    }, [node.group_path, jobId, statusFilter, debouncedSearch, page, live]);
 
     useEffect(() => {
         const onKeyDown = (event: KeyboardEvent) => {
@@ -346,7 +472,8 @@ const GroupDrawer = ({
 
     const statusCounts = data?.status_counts ?? node.status_counts;
     const allCount = Object.values(statusCounts).reduce((a, b) => a + b, 0);
-    const totalPages = Math.max(1, Math.ceil((data?.total_count ?? 0) / PAGE_SIZE));
+    const totalCount = data?.total_count ?? 0;
+    const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
 
     const chip = (label: string, count: number, value: string | null) => (
         <button
@@ -378,7 +505,7 @@ const GroupDrawer = ({
                 className="fixed inset-0 z-40 bg-black/25 animate-in fade-in-0 duration-150"
                 onClick={onClose}
             />
-            <div className="fixed inset-y-0 right-0 z-50 flex w-[460px] max-w-[92vw] flex-col border-l border-border bg-card shadow-2xl animate-in slide-in-from-right duration-200">
+            <div className="fixed inset-y-0 right-0 z-50 flex w-[480px] max-w-[92vw] flex-col border-l border-border bg-card shadow-2xl animate-in slide-in-from-right duration-200">
                 <div className="flex items-center justify-between border-b border-border px-5 py-4">
                     <div className="flex min-w-0 items-center gap-2">
                         <span className="truncate font-mono text-sm font-semibold text-foreground">
@@ -409,11 +536,38 @@ const GroupDrawer = ({
                     )}
                 </div>
 
-                <div className="mt-3 flex-1 overflow-y-auto px-5">
+                {allCount > PAGE_SIZE && (
+                    <div className="px-5 pt-3">
+                        <Input
+                            value={searchTerm}
+                            onChange={(event) => {
+                                setSearchTerm(event.target.value);
+                                setPage(0);
+                            }}
+                            placeholder="Search by job id…"
+                            className="h-8 text-[13px]"
+                        />
+                    </div>
+                )}
+
+                <div className="mt-3 flex items-center gap-3 border-b border-border px-5 pb-2 text-[11px] font-medium text-muted-foreground">
+                    <span className="w-[92px] shrink-0">Status</span>
+                    <span className="min-w-0 flex-1">Job</span>
+                    <span className="w-14 shrink-0 text-right">Calls</span>
+                    <span className="w-12 shrink-0 text-right">Duration</span>
+                    <span className="w-16 shrink-0 text-right">Started</span>
+                    <span className="w-3.5 shrink-0" />
+                </div>
+
+                <div className="flex-1 overflow-y-auto px-5">
                     {data == null ? (
                         <div className="flex justify-center py-10">
                             <div className="h-5 w-5 animate-spin rounded-full border-2 border-border border-t-primary" />
                         </div>
+                    ) : data.items.length === 0 ? (
+                        <p className="py-8 text-center text-[13px] text-muted-foreground">
+                            No matching jobs.
+                        </p>
                     ) : (
                         data.items.map((member) => {
                             const badge = jobStatusBadge(member.status.toUpperCase());
@@ -425,13 +579,19 @@ const GroupDrawer = ({
                                     type="button"
                                     onClick={() => navigate(`/jobs/${member.job_id}`)}
                                     title={member.job_id}
-                                    className="flex w-full items-center gap-3 border-b border-border/60 py-2.5 text-left transition-colors last:border-b-0 hover:bg-muted/40"
+                                    className="group flex w-full items-center gap-3 border-b border-border/60 py-2.5 text-left transition-colors last:border-b-0 hover:bg-muted/40"
                                 >
-                                    <StatusBadge tone={badge.tone} label={badge.label} pulse={badge.pulse} />
+                                    <span className="flex w-[92px] shrink-0">
+                                        <StatusBadge
+                                            tone={badge.tone}
+                                            label={badge.label}
+                                            pulse={badge.pulse}
+                                        />
+                                    </span>
                                     <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-foreground">
                                         {idSuffix}
                                     </span>
-                                    <span className="shrink-0 text-[12px] tabular-nums text-muted-foreground">
+                                    <span className="w-14 shrink-0 text-right text-[12px] tabular-nums text-muted-foreground">
                                         {member.result_count.toLocaleString()} /{" "}
                                         {member.input_count.toLocaleString()}
                                     </span>
@@ -441,6 +601,7 @@ const GroupDrawer = ({
                                     <span className="w-16 shrink-0 text-right text-[12px] tabular-nums text-muted-foreground">
                                         {startedText(member.started_at)}
                                     </span>
+                                    <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
                                 </button>
                             );
                         })
@@ -448,12 +609,18 @@ const GroupDrawer = ({
                 </div>
 
                 <div className="border-t border-border px-5 pb-4">
-                    <TablePagination
-                        page={page}
-                        totalPages={totalPages}
-                        onPageChange={setPage}
-                        resultsLabel={`${(data?.total_count ?? 0).toLocaleString()} jobs`}
-                    />
+                    {totalPages > 1 ? (
+                        <TablePagination
+                            page={page}
+                            totalPages={totalPages}
+                            onPageChange={setPage}
+                            resultsLabel={`${totalCount.toLocaleString()} jobs`}
+                        />
+                    ) : (
+                        <p className="pt-4 text-[13px] text-muted-foreground">
+                            {totalCount.toLocaleString()} job{totalCount === 1 ? "" : "s"}
+                        </p>
+                    )}
                 </div>
             </div>
         </>

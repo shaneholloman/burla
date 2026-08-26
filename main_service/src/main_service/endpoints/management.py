@@ -834,6 +834,10 @@ def _stage_to_nodes(
                 "function_name": function_name,
                 "job_count": len(jobs),
                 "group_path": group_path,
+                # True when this node is a later pipeline stage re-parented
+                # under the previous stage (data-flow edge); False when it was
+                # spawned from inside its graph parent (nesting edge).
+                "chained": False,
                 # Single-job groups link straight to that job's page.
                 "job_id": jobs[0]["job_id"] if len(jobs) == 1 else None,
                 # "You are here" marker for the graph on nested job pages.
@@ -905,6 +909,8 @@ def _structure_nodes(jobs: list[dict], current_job_id: str, prefix: str) -> list
     # trunk renders as a straight line with nested branches hanging off it.
     for prev_nodes, next_nodes in zip(stage_nodes, stage_nodes[1:]):
         anchor = max(prev_nodes, key=lambda node: node["_max_ended_at"])
+        for node in next_nodes:
+            node["chained"] = True
         anchor["children"][:0] = next_nodes
     for nodes in stage_nodes:
         for node in nodes:
@@ -974,6 +980,7 @@ def job_tree_group_members(
     job_id: str,
     path: str,
     status: str | None = None,
+    search: str | None = None,
     offset: int = 0,
     limit: int = 15,
 ):
@@ -988,6 +995,9 @@ def job_tree_group_members(
     status_counts = node["status_counts"]
     if status:
         members = [job for job in members if job["status"] == status]
+    if search:
+        needle = search.lower()
+        members = [job for job in members if needle in job["job_id"].lower()]
     now = time()
 
     def duration(job: dict) -> float | None:

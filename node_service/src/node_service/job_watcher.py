@@ -28,7 +28,7 @@ from node_service.worker_client import (
     READD_MAX_IO_STALL_FRACTION,
     READD_MAX_NETWORK_UTILIZATION_FRACTION,
     READD_MAX_WORKER_MEMORY_USED_FRACTION,
-    READD_PRESSURE_COOLDOWN_SECONDS,
+    SLOT_TRADE_PRESSURE_COOLDOWN_SECONDS,
     AddGateSampler,
     WorkerStallTracker,
     _workers_memory_limit_bytes,
@@ -257,7 +257,7 @@ async def _slot_trade_loop(session, logger):
         # donated).
         recently_pressured = (
             time() - SELF["last_pressure_retirement_at"]
-            < READD_PRESSURE_COOLDOWN_SECONDS
+            < SLOT_TRADE_PRESSURE_COOLDOWN_SECONDS
         )
         if recently_pressured:
             continue

@@ -56,10 +56,18 @@ DYNAMIC_RAM_STARTUP_MONITOR_SECONDS = 30
 # kernel has PSI, and its cgroup-root path (rather than /proc/pressure/cpu)
 # keeps the probe scoped to the fake VM inside a local-dev DinD node.
 CPU_PRESSURE_FILE = Path("/sys/fs/cgroup/cpu.pressure")
-# 2s is PSI's own internal update cadence; 1s windows are too noisy.
-CPU_PRESSURE_MONITOR_INTERVAL_SECONDS = 2
+# Dynamic CPU holds each node at "all cores busy, minimal queueing". Capacity
+# ramps one worker per one-second tick in either direction: parked workers are
+# restored while cores sit measurably idle, and one worker is parked only when
+# the machine is saturated AND tasks measurably wait for a core. In the band
+# between, nothing changes. PSI alone must never shed capacity: one greedy
+# multi-process call (OCRmyPDF, for example, defaults to every visible core)
+# pins its own cgroup's PSI above threshold at any node utilization.
+CPU_PRESSURE_MONITOR_INTERVAL_SECONDS = 1
 CPU_PRESSURE_MAX_STALL_FRACTION = 0.10
-CPU_PRESSURE_MAX_THROTTLE_FRACTION = 0.5
+CPU_PRESSURE_MAX_WORKERS_PER_TICK = 1
+CPU_UTILIZATION_PARK_MIN = 0.95
+CPU_UTILIZATION_ADD_MAX = 0.90
 
 # Throttled workers are parked, not progressing: the quota keeps TCP,
 # heartbeats, and library timers alive while leaving the machine to the
@@ -71,10 +79,12 @@ CPU_QUOTA_PERIOD_USEC = 100_000
 # Worker recovery: the inverse of the pressure monitors. Thresholds sit well
 # below the throttle/retire thresholds (hysteresis) so a node doesn't
 # oscillate between parking and recovering the same worker.
-READD_MONITOR_INTERVAL_SECONDS = 5
-READD_PRESSURE_COOLDOWN_SECONDS = 30
+READD_MONITOR_INTERVAL_SECONDS = 1
 READD_MAX_CPU_STALL_FRACTION = 0.05
 READD_MAX_WORKER_MEMORY_USED_FRACTION = 0.75
+# Slot transfers keep a cooldown so pressured nodes do not immediately trade
+# capacity back and forth. Worker recovery itself has no time-based cooldown.
+SLOT_TRADE_PRESSURE_COOLDOWN_SECONDS = 30
 
 # Capacity recovery is also blocked while the disk or the NIC is already the
 # bottleneck: IO-bound work looks like low CPU + low RAM, which would
@@ -261,7 +271,9 @@ async def verify_worker_cgroup_isolation(workers: list, logger: Logger):
         memory_max = (slice_dir / "memory.max").read_text().strip()
         cpu_weight = (slice_dir / "cpu.weight").read_text().strip()
         if memory_max == "max":
-            problems.append(f"{WORKERS_CGROUP_SLICE} has no memory cap (memory.max=max)")
+            problems.append(
+                f"{WORKERS_CGROUP_SLICE} has no memory cap (memory.max=max)"
+            )
         # 80 is what the startup script writes; anything else means the config
         # was not applied (100 is the kernel default).
         if cpu_weight != "80":
@@ -699,6 +711,52 @@ class AddGateSampler:
         return io_stall, network_utilization
 
 
+class SliceCpuSampler:
+    """Aggregate CPU utilization (0..1) of the workers slice over the window
+    since the previous sample() call: cpu.stat usage_usec delta divided by
+    elapsed core-time. The slice directory is resolved lazily from a live
+    worker and cached. When the slice cannot be read (isolation inactive,
+    worker mid-relaunch, local-dev quirks) it falls back to whole-VM
+    utilization via psutil, which is the same quantity plus node_service."""
+
+    def __init__(self):
+        self._slice_dir = None
+        self._last_usage_usec = None
+        self._last_read_at = None
+        psutil.cpu_percent()  # open the fallback's measurement interval
+
+    def _usage_usec(self, workers):
+        if self._slice_dir is None:
+            for worker in workers:
+                try:
+                    self._slice_dir = _workers_cgroup_slice_dir(worker)
+                except OSError:
+                    continue  # worker process mid-relaunch; try the next one
+                if self._slice_dir is not None:
+                    break
+        if self._slice_dir is None:
+            return None
+        for line in (self._slice_dir / "cpu.stat").read_text().splitlines():
+            if line.startswith("usage_usec "):
+                return int(line.split()[1])
+        return None
+
+    def sample(self, workers) -> float:
+        read_at = time.perf_counter()
+        try:
+            usage_usec = self._usage_usec(workers)
+        except OSError:
+            usage_usec = None  # slice mid-teardown; fall back this tick
+        if usage_usec is None:
+            return psutil.cpu_percent() / 100
+        last_usage_usec, last_read_at = self._last_usage_usec, self._last_read_at
+        self._last_usage_usec, self._last_read_at = usage_usec, read_at
+        if last_usage_usec is None:
+            return psutil.cpu_percent() / 100  # first sample only opens the interval
+        elapsed_usec = (read_at - last_read_at) * 1_000_000
+        return (usage_usec - last_usage_usec) / (elapsed_usec * (os.cpu_count() or 1))
+
+
 async def cpu_pressure_monitor_loop():
     if not CPU_PRESSURE_FILE.exists():
         await Logger().log(
@@ -719,6 +777,7 @@ async def cpu_pressure_monitor_loop():
 
     stall_tracker = WorkerStallTracker()
     stall_tracker.max_stall_fraction(_active_dynamic_workers())  # open intervals
+    cpu_sampler = SliceCpuSampler()
     while SELF["dynamic_func_cpu"]:
         await asyncio.sleep(CPU_PRESSURE_MONITOR_INTERVAL_SECONDS)
         active_workers = _active_dynamic_workers()
@@ -737,7 +796,12 @@ async def cpu_pressure_monitor_loop():
                 await _relocate_worker_process_or_retire(worker)
 
         stall_fraction = stall_tracker.max_stall_fraction(unthrottled_workers)
+        utilization = cpu_sampler.sample(active_workers)
 
+        # Both conditions must hold: idle cores mean the machine is not
+        # overcommitted no matter what any single worker's PSI claims.
+        if utilization < CPU_UTILIZATION_PARK_MIN:
+            continue
         if stall_fraction < CPU_PRESSURE_MAX_STALL_FRACTION:
             continue
 
@@ -755,16 +819,11 @@ async def cpu_pressure_monitor_loop():
         # biggest tasks keep the cores they are clearly using.
         running_worker_cpu.sort(key=lambda item: item[0])
 
-        # Batch scales with how far past the threshold pressure is, capped at
-        # half the running workers per tick, so a slammed node converges in a
-        # few ticks while mild pressure parks one worker at a time.
-        throttle_fraction = min(
-            CPU_PRESSURE_MAX_THROTTLE_FRACTION,
-            stall_fraction - CPU_PRESSURE_MAX_STALL_FRACTION,
-        )
-        n_to_throttle = max(1, int(len(running_worker_cpu) * throttle_fraction))
+        # Ramp down slowly even when pressure spikes. The next one-second
+        # sample gets a chance to observe recovery before another worker parks.
         await throttle_workers_for_pressure(
-            running_worker_cpu[:n_to_throttle], reason="CPU pressure"
+            running_worker_cpu[:CPU_PRESSURE_MAX_WORKERS_PER_TICK],
+            reason="CPU pressure",
         )
 
 
@@ -790,9 +849,7 @@ async def _boot_readded_worker():
         await worker.load_function(SELF["function_pkl"])
     except Exception as e:
         if worker.container_id is not None:
-            asyncio.create_task(
-                worker._remove_retired_container(worker.container_id)
-            )
+            asyncio.create_task(worker._remove_retired_container(worker.container_id))
         await debug_log("worker_readd_failed", error=f"{type(e).__name__}: {e}")
         return
 
@@ -819,9 +876,7 @@ async def _unthrottle_one_parked_worker(reason: str, via: str):
         # Re-filter under the lock: a revocation or RAM kill may have
         # consumed the parked worker since the caller checked.
         active_workers = _active_dynamic_workers()
-        throttled_workers = [
-            worker for worker in active_workers if worker.throttled
-        ]
+        throttled_workers = [worker for worker in active_workers if worker.throttled]
         if not throttled_workers:
             return
         # Most progress first: the attempt closest to done frees its slot
@@ -859,9 +914,7 @@ async def _unthrottle_one_parked_worker(reason: str, via: str):
             except OSError:
                 pass  # worker process mid-relaunch; metric only
         await worker.unthrottle()
-        unthrottled_count = (
-            len(active_workers) - len(throttled_workers) + 1
-        )
+        unthrottled_count = len(active_workers) - len(throttled_workers) + 1
         await Logger().log(
             f"Node parallelism increased from {unthrottled_count - 1} to "
             f"{unthrottled_count}: {reason}, restored full CPU to a parked "
@@ -882,31 +935,23 @@ async def _unthrottle_one_parked_worker(reason: str, via: str):
 
 
 async def dynamic_worker_readd_loop():
-    """Inverse of the pressure monitors: while this node has parked workers or
-    runs fewer workers than the slots it owes the job, and pressure has stayed
-    away for a cooldown, recover capacity one worker per tick: unthrottle
-    parked workers first (free capacity that already exists and holds an
-    input), then boot replacements for retired ones. Together with the
-    monitors this makes worker count fully elastic instead of a one-way
-    ratchet."""
-    can_check_cpu = CPU_PRESSURE_FILE.exists()
-    stall_tracker = WorkerStallTracker()
+    """Inverse of the CPU pressure monitor: while cores sit measurably idle
+    (and the disk/NIC gates agree), recover capacity one worker per
+    one-second tick: unthrottle parked workers first (they already hold an
+    input), then boot replacements for retired ones. Idle cores, not PSI,
+    drive recovery: a single greedy multi-process call keeps its own
+    cgroup's PSI above threshold at any utilization, which must never
+    strand parked workers."""
+    cpu_sampler = SliceCpuSampler()
     gate_sampler = AddGateSampler()
     while SELF["dynamic_func_ram"] or SELF["dynamic_func_cpu"]:
         await asyncio.sleep(READD_MONITOR_INTERVAL_SECONDS)
 
-        stall_fraction = 0.0
-        if can_check_cpu:
-            unthrottled_workers = [
-                worker for worker in _active_dynamic_workers() if not worker.throttled
-            ]
-            stall_fraction = stall_tracker.max_stall_fraction(unthrottled_workers)
+        active_workers = _active_dynamic_workers()
+        utilization = cpu_sampler.sample(active_workers)
         io_stall, network_utilization = gate_sampler.sample()
 
-        pressure_gone_for = time.time() - SELF["last_pressure_retirement_at"]
-        if pressure_gone_for < READD_PRESSURE_COOLDOWN_SECONDS:
-            continue
-        if stall_fraction > READD_MAX_CPU_STALL_FRACTION:
+        if utilization > CPU_UTILIZATION_ADD_MAX:
             continue
         # These also gate the unthrottle below: unlike CPU, nothing re-parks
         # a worker if resuming it swamps the disk or NIC, so prevention is
@@ -916,23 +961,14 @@ async def dynamic_worker_readd_loop():
         if network_utilization > READD_MAX_NETWORK_UTILIZATION_FRACTION:
             continue
 
-        # No queue gate for unthrottling: a parked worker owns its own input
-        # (an empty queue must not strand it at 1% CPU forever). CPU-parked
-        # workers have no RAM gate either (their RSS is already resident);
-        # swap-parked workers are gated on RAM headroom inside
-        # _unthrottle_one_parked_worker. Unthrottling one worker per tick,
-        # without touching the pressure timestamp, means a re-spike simply
-        # re-throttles and re-arms the cooldown: bounded oscillation
-        # converging on sustainable parallelism. (Idle workers also resume
-        # parked attempts directly, see _process_inputs; this path covers
-        # pressure clearing while every other worker is still busy.)
-        if any(worker.throttled for worker in _active_dynamic_workers()):
+        throttled_workers = [worker for worker in active_workers if worker.throttled]
+        if throttled_workers:
             await _unthrottle_one_parked_worker(
-                reason="pressure subsided", via="recovery_loop"
+                reason="cores are idle",
+                via="recovery_loop",
             )
             continue
 
-        active_workers = _active_dynamic_workers()
         deficit = SELF["target_parallelism"] - len(active_workers)
         if deficit <= 0:
             continue
@@ -1920,12 +1956,12 @@ class WorkerClient:
         while True:
             self.is_idle = True
             # Parked attempts have absolute priority over fresh inputs: a
-            # worker going idle frees exactly one worker's worth of capacity,
-            # which belongs to the most-progressed parked attempt if one
-            # exists, and the queue may only be popped while nothing is
-            # parked. (One handoff per idle transition; if the CPU monitor
-            # re-parks someone during the wait, the next idle transition or
-            # the recovery loop resumes them.)
+            # finishing worker's freed capacity goes straight to the
+            # most-progressed parked attempt, draining the parked count at
+            # task-completion speed so workers spend moments, not minutes,
+            # throttled. The queue may only be popped while nothing is
+            # parked, so any capacity reduction shows up as idle-ready
+            # workers instead of frozen in-flight attempts.
             if _parked_workers_exist():
                 await _unthrottle_one_parked_worker(
                     reason="a worker went idle", via="idle_handoff"

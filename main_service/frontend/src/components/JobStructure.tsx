@@ -324,7 +324,8 @@ const GraphNodeCard = ({
 // line ends at the back of the head, like a shaft meeting an arrowhead.
 const EDGE_INSET = 7;
 const EDGE_FADE_WIDTH = 40;
-const LAYOUT_ANIMATION_MS = 300;
+const LAYOUT_ANIMATION_MS = 200;
+const REVEAL_FADE_MS = 120;
 const CANVAS_PAD = 24;
 
 const easeInOut = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
@@ -355,7 +356,9 @@ const interpolateLayout = (
     fadeT: number
 ): GraphLayout => {
     if (geoT >= 1 && fadeT >= 1) return to;
-    const lerp = (a: number, b: number) => a + (b - a) * geoT;
+    // Whole pixels only: fractional card positions against the browser's
+    // integer scroll quantization make a pinned card vibrate by ~1px.
+    const lerp = (a: number, b: number) => Math.round(a + (b - a) * geoT);
     // An item caught mid-fade when the tween retargets (fresh tree data) must
     // keep fading from where it was, never pop to full opacity.
     const carryOpacity = (previous: { opacity?: number }) =>
@@ -494,20 +497,26 @@ const StructureGraph = ({
             const fadeT =
                 elapsed <= LAYOUT_ANIMATION_MS
                     ? 0
-                    : Math.min(1, (elapsed - LAYOUT_ANIMATION_MS) / 180);
+                    : Math.min(1, (elapsed - LAYOUT_ANIMATION_MS) / REVEAL_FADE_MS);
             // Queue the counter-scroll so the layout effect applies it in the
             // SAME commit as the interpolated positions: setting scrollLeft
             // here directly would lead the (async) React render by a frame
             // and make the pinned card shimmy.
             if (el && anchorPin && anchorTo && anchorFrom) {
-                const anchorX = anchorFrom.x + (anchorTo.x - anchorFrom.x) * geoT;
-                const viewportX =
+                // Rounded with the exact same expression the renderer uses for
+                // the card's x, so anchor position minus scroll is a constant
+                // integer: any mismatch reads as a 1px vibration.
+                const anchorX = Math.round(
+                    anchorFrom.x + (anchorTo.x - anchorFrom.x) * geoT
+                );
+                const viewportX = Math.round(
                     anchorPin.fromViewportX +
-                    (anchorPin.toViewportX - anchorPin.fromViewportX) * geoT;
+                        (anchorPin.toViewportX - anchorPin.fromViewportX) * geoT
+                );
                 pendingScrollRef.current = Math.max(0, anchorX + CANVAS_PAD - viewportX);
             }
             setLayout(interpolateLayout(from, target, geoT, fadeT));
-            if (elapsed < LAYOUT_ANIMATION_MS + 180) {
+            if (elapsed < LAYOUT_ANIMATION_MS + REVEAL_FADE_MS) {
                 frameRef.current = requestAnimationFrame(step);
                 return;
             }

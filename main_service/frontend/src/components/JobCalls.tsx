@@ -748,8 +748,9 @@ const JobCalls = ({
         }
     }, [jobId, sort, descending, statusFilter, logsOnly, page, searchIndex]);
 
+    // Keep the previous job's rows on screen while the new job's page loads:
+    // nulling taskPage here would flash skeletons on every graph navigation.
     useEffect(() => {
-        setTaskPage(null);
         setPage(0);
         setSearchValue("");
         pageCursors.current = { 0: null };

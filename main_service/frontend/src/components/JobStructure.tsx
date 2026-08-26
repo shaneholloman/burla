@@ -109,6 +109,7 @@ interface PlacedNode {
     node: StructureNode;
     x: number;
     y: number;
+    opacity?: number;
 }
 
 interface RegionRect {
@@ -118,6 +119,7 @@ interface RegionRect {
     width: number;
     height: number;
     depth: number;
+    opacity?: number;
 }
 
 interface GraphEdge {
@@ -218,13 +220,11 @@ const GraphNodeCard = ({
     placed,
     currentJobId,
     onOpenGroup,
-    onReveal,
     isExpanded,
 }: {
     placed: PlacedNode;
     currentJobId: string;
     onOpenGroup: (node: StructureNode) => void;
-    onReveal: (element: HTMLElement, rightOverflow?: number) => void;
     isExpanded: boolean;
 }) => {
     const { node, x, y } = placed;
@@ -291,22 +291,11 @@ const GraphNodeCard = ({
         .filter(Boolean)
         .join("\n");
     const inner = isGroup ? (
-        <button
-            type="button"
-            onClick={(event) => {
-                onReveal(event.currentTarget, 5);
-                onOpenGroup(node);
-            }}
-            className={innerClassName}
-        >
+        <button type="button" onClick={() => onOpenGroup(node)} className={innerClassName}>
             {body}
         </button>
     ) : node.job_id && !isCurrent ? (
-        <Link
-            to={`/jobs/${node.job_id}`}
-            onClick={(event) => onReveal(event.currentTarget)}
-            className={innerClassName}
-        >
+        <Link to={`/jobs/${node.job_id}`} className={innerClassName}>
             {body}
         </Link>
     ) : (
@@ -314,8 +303,8 @@ const GraphNodeCard = ({
     );
     return (
         <div
-            className="absolute animate-in fade-in duration-300"
-            style={{ left: x, top: y, width: NODE_W, height: NODE_H }}
+            className="absolute"
+            style={{ left: x, top: y, width: NODE_W, height: NODE_H, opacity: placed.opacity ?? 1 }}
             title={title}
         >
             {/* Stacked-card effect: a same-size card offset down-right, so a
@@ -355,16 +344,24 @@ const layoutSignature = (layout: GraphLayout) =>
 
 // One tween drives cards, regions, edges, and the canvas together, so arrows
 // stay pinned to the cards they connect throughout the animation (CSS can
-// transition positions but not SVG path geometry).
-const interpolateLayout = (from: GraphLayout, to: GraphLayout, t: number): GraphLayout => {
-    if (t >= 1) return to;
-    const lerp = (a: number, b: number) => a + (b - a) * t;
+// transition positions but not SVG path geometry). Two sub-timelines: existing
+// geometry glides during geoT, and only once the space has fully opened does
+// newly revealed content fade in (fadeT), so nothing ever renders outside its
+// region or under a card that hasn't moved yet.
+const interpolateLayout = (
+    from: GraphLayout,
+    to: GraphLayout,
+    geoT: number,
+    fadeT: number
+): GraphLayout => {
+    if (geoT >= 1 && fadeT >= 1) return to;
+    const lerp = (a: number, b: number) => a + (b - a) * geoT;
     const fromNodes = new Map(from.nodes.map((p) => [nodeKey(p), p]));
     const nodes = to.nodes.map((placed) => {
         const previous = fromNodes.get(nodeKey(placed));
         return previous
             ? { ...placed, x: lerp(previous.x, placed.x), y: lerp(previous.y, placed.y) }
-            : placed;
+            : { ...placed, opacity: fadeT };
     });
     const byKey = new Map(nodes.map((placed) => [nodeKey(placed), placed]));
     const edges = to.edges.map((edge) => ({
@@ -382,7 +379,7 @@ const interpolateLayout = (from: GraphLayout, to: GraphLayout, t: number): Graph
                   width: lerp(previous.width, region.width),
                   height: lerp(previous.height, region.height),
               }
-            : region;
+            : { ...region, opacity: fadeT };
     });
     return {
         nodes,
@@ -414,6 +411,18 @@ const StructureGraph = ({
         [root, expanded]
     );
 
+    const scrollRef = useRef<HTMLDivElement>(null);
+    const hasCenteredRef = useRef(false);
+    const [fades, setFades] = useState({ left: false, right: false });
+    const updateFades = () => {
+        const el = scrollRef.current;
+        if (!el) return;
+        setFades({
+            left: el.scrollLeft > 1,
+            right: el.scrollLeft + el.clientWidth < el.scrollWidth - 1,
+        });
+    };
+
     // What actually renders: the target layout, or a frame on the way there.
     const [layout, setLayout] = useState<GraphLayout>(target);
     const layoutRef = useRef(target);
@@ -429,74 +438,67 @@ const StructureGraph = ({
             setLayout(target);
             return;
         }
+        const el = scrollRef.current;
+
+        // The selected card must not move on screen: the world reflows around
+        // it. Each frame we counter-scroll by exactly how far the anchor's
+        // layout position has moved, keeping it pixel-stationary. Exact id
+        // first: contains_current is stale for a moment after navigating.
+        const findCurrent = (candidates: PlacedNode[]) =>
+            candidates.find((n) => n.node.job_id === currentJobId) ??
+            candidates.find((n) => n.node.contains_current);
+        const anchorTo = findCurrent(target.nodes);
+        const anchorFrom = anchorTo
+            ? layoutRef.current.nodes.find((p) => nodeKey(p) === nodeKey(anchorTo))
+            : undefined;
+        let anchorViewportX: number | null = null;
+        if (el && anchorTo && anchorFrom) {
+            const viewportX = anchorFrom.x + CANVAS_PAD - el.scrollLeft;
+            // Only pin anchors that are actually on screen; off-screen ones
+            // get scrolled into view once the motion settles instead.
+            if (viewportX >= 0 && viewportX <= el.clientWidth - NODE_W) {
+                anchorViewportX = viewportX;
+            }
+        }
+
         const startedAt = performance.now();
         const step = (now: number) => {
-            const t = Math.min(1, (now - startedAt) / LAYOUT_ANIMATION_MS);
-            setLayout(interpolateLayout(from, target, easeInOut(t)));
-            if (t < 1) frameRef.current = requestAnimationFrame(step);
+            const elapsed = now - startedAt;
+            const geoT = easeInOut(Math.min(1, elapsed / LAYOUT_ANIMATION_MS));
+            const fadeT =
+                elapsed <= LAYOUT_ANIMATION_MS
+                    ? 0
+                    : Math.min(1, (elapsed - LAYOUT_ANIMATION_MS) / 180);
+            setLayout(interpolateLayout(from, target, geoT, fadeT));
+            if (el && anchorViewportX != null && anchorTo && anchorFrom) {
+                const anchorX = anchorFrom.x + (anchorTo.x - anchorFrom.x) * geoT;
+                el.scrollLeft = Math.max(0, anchorX + CANVAS_PAD - anchorViewportX);
+            }
+            if (elapsed < LAYOUT_ANIMATION_MS + 180) {
+                frameRef.current = requestAnimationFrame(step);
+                return;
+            }
+            if (el && anchorTo && anchorViewportX == null) {
+                const nodeLeft = anchorTo.x + CANVAS_PAD;
+                const nodeRight = nodeLeft + NODE_W;
+                const safeLeft = el.scrollLeft + EDGE_FADE_WIDTH;
+                const safeRight = el.scrollLeft + el.clientWidth - EDGE_FADE_WIDTH;
+                if (nodeLeft < safeLeft) {
+                    el.scrollTo({ left: Math.max(0, nodeLeft - EDGE_FADE_WIDTH), behavior: "smooth" });
+                } else if (nodeRight > safeRight) {
+                    el.scrollTo({
+                        left: nodeRight + EDGE_FADE_WIDTH - el.clientWidth,
+                        behavior: "smooth",
+                    });
+                }
+            }
         };
         frameRef.current = requestAnimationFrame(step);
         return () => {
             if (frameRef.current) cancelAnimationFrame(frameRef.current);
         };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [target]);
-
-    const scrollRef = useRef<HTMLDivElement>(null);
-    const hasCenteredRef = useRef(false);
-    const [fades, setFades] = useState({ left: false, right: false });
-    const updateFades = () => {
-        const el = scrollRef.current;
-        if (!el) return;
-        setFades({
-            left: el.scrollLeft > 1,
-            right: el.scrollLeft + el.clientWidth < el.scrollWidth - 1,
-        });
-    };
-
-    // Selecting a job must never move it out of sight: when the viewed job
-    // changes, scroll (if needed) to where its card will END UP once the
-    // collapse/expand tween settles. The layout can legitimately change twice
-    // after a click (once from the stale tree, once from the fresh one), so
-    // keep correcting for a short window rather than exactly once.
-    const prevJobRef = useRef(currentJobId);
-    const scrollOwedUntilRef = useRef(0);
-    useEffect(() => {
-        if (prevJobRef.current !== currentJobId) {
-            prevJobRef.current = currentJobId;
-            scrollOwedUntilRef.current = Date.now() + 1500;
-        }
-        if (Date.now() > scrollOwedUntilRef.current) return;
-        const el = scrollRef.current;
-        if (!el) return;
-        // Exact id first: contains_current can be stale for one render after
-        // navigating (it comes from the previous page's tree fetch).
-        const current =
-            target.nodes.find((n) => n.node.job_id === currentJobId) ??
-            target.nodes.find((n) => n.node.contains_current);
-        if (!current) return;
-        const nodeLeft = current.x + CANVAS_PAD;
-        const nodeRight = nodeLeft + NODE_W;
-        const safeLeft = el.scrollLeft + EDGE_FADE_WIDTH;
-        const safeRight = el.scrollLeft + el.clientWidth - EDGE_FADE_WIDTH;
-        let scrollTo: number | null = null;
-        if (nodeLeft < safeLeft) scrollTo = nodeLeft - EDGE_FADE_WIDTH;
-        else if (nodeRight > safeRight) scrollTo = nodeRight + EDGE_FADE_WIDTH - el.clientWidth;
-        if (scrollTo != null) el.scrollTo({ left: Math.max(0, scrollTo), behavior: "smooth" });
-    }, [target, currentJobId]);
-
-    const revealNode = (element: HTMLElement, rightOverflow = 0) => {
-        const el = scrollRef.current!;
-        const viewport = el.getBoundingClientRect();
-        const node = element.getBoundingClientRect();
-        const safeLeft = viewport.left + EDGE_FADE_WIDTH;
-        const safeRight = viewport.right - EDGE_FADE_WIDTH;
-        let delta = 0;
-        if (node.left < safeLeft) delta = node.left - safeLeft;
-        else if (node.right + rightOverflow > safeRight) {
-            delta = node.right + rightOverflow - safeRight;
-        }
-        if (delta !== 0) el.scrollBy({ left: delta, behavior: "smooth" });
-    };
 
     // Center "you are here" on first render only: later navigation within the
     // workload keeps whatever scroll position the user has.
@@ -556,7 +558,7 @@ const StructureGraph = ({
                         <div
                             key={region.key}
                             className={cn(
-                                "pointer-events-none absolute rounded-xl animate-in fade-in duration-300",
+                                "pointer-events-none absolute rounded-xl",
                                 region.depth % 2 === 0
                                     ? "bg-[hsl(var(--graph-well-1))]"
                                     : "bg-[hsl(var(--graph-well-2))]"
@@ -566,6 +568,7 @@ const StructureGraph = ({
                                 top: region.y,
                                 width: region.width,
                                 height: region.height,
+                                opacity: region.opacity ?? 1,
                             }}
                         />
                     ))}
@@ -605,9 +608,10 @@ const StructureGraph = ({
                                     key={to.node.group_path}
                                     d={path}
                                     fill="none"
-                                    className="animate-in fade-in duration-300 stroke-muted-foreground/70"
+                                    className="stroke-muted-foreground/70"
                                     strokeWidth={1.5}
                                     markerEnd="url(#arrow-flow)"
+                                    opacity={Math.min(from.opacity ?? 1, to.opacity ?? 1)}
                                 />
                             );
                         })}
@@ -618,7 +622,6 @@ const StructureGraph = ({
                             placed={placed}
                             currentJobId={currentJobId}
                             onOpenGroup={onOpenGroup}
-                            onReveal={revealNode}
                             isExpanded={
                                 placed.node.group_path == null ||
                                 expanded.has(placed.node.group_path)

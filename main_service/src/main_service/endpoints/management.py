@@ -798,16 +798,27 @@ def watch_jobs(parent_job_id: str | None = None):
     )
 
 
-def _group_child_jobs(parent_ids: list[str]) -> list[dict]:
-    """The next nesting level below parent_ids, grouped by function name.
-    Groups recurse: a group's children are the (grouped) jobs spawned from
-    inside any of its member jobs. Grouping keeps huge fan-outs readable:
-    1,000 nested `train_model` jobs render as one node with a count."""
-    children = history.jobs_with_parents(parent_ids)
+# The head stamps ended_at on its ~1s state-push cadence, so a job's
+# sequential successor (which the client starts the moment results arrive)
+# can start slightly before the predecessor's recorded end. Starts inside
+# this window still count as "after".
+_ENDED_AT_STAMP_LAG_SECONDS = 1.5
+
+
+def _job_end(job: dict) -> float:
+    return job["ended_at"] if job["ended_at"] is not None else float("inf")
+
+
+def _stage_to_nodes(
+    stage_jobs: list[dict], current_job_id: str, stage_index: int, prefix: str
+) -> list[dict]:
+    """One parallel stage as graph nodes, grouped by function name. Grouping
+    keeps huge fan-outs readable: 1,000 parallel `train_model` jobs render as
+    one node with a count."""
     by_function: dict[str, list[dict]] = {}
-    for job in children:
+    for job in stage_jobs:
         by_function.setdefault(job["function_name"], []).append(job)
-    groups = []
+    nodes = []
     for function_name, jobs in by_function.items():
         status_counts: dict[str, int] = {}
         for job in jobs:
@@ -815,12 +826,24 @@ def _group_child_jobs(parent_ids: list[str]) -> list[dict]:
         cpus = {job["func_cpu"] for job in jobs}
         rams = {job["func_ram"] for job in jobs}
         gpus = {job["func_gpu"] for job in jobs}
-        groups.append(
+        # Stable id for this node within its workload's tree, used by the
+        # members drawer: position (stage) + function name per level.
+        group_path = f"{prefix}/{stage_index}:{function_name}"
+        nodes.append(
             {
                 "function_name": function_name,
                 "job_count": len(jobs),
+                "group_path": group_path,
+                # True when this node is a later pipeline stage re-parented
+                # under the previous stage (data-flow edge); False when it was
+                # spawned from inside its graph parent (nesting edge).
+                "chained": False,
                 # Single-job groups link straight to that job's page.
                 "job_id": jobs[0]["job_id"] if len(jobs) == 1 else None,
+                # "You are here" marker for the graph on nested job pages.
+                "contains_current": any(
+                    job["job_id"] == current_job_id for job in jobs
+                ),
                 "status_counts": status_counts,
                 "input_count": sum(job["n_inputs"] for job in jobs),
                 "result_count": sum(job["n_results"] for job in jobs),
@@ -833,20 +856,107 @@ def _group_child_jobs(parent_ids: list[str]) -> list[dict]:
                     for job in jobs
                     if job["status"] == "running"
                 ),
-                "children": _group_child_jobs([job["job_id"] for job in jobs]),
+                "children": _structure_nodes(
+                    history.jobs_with_parents([job["job_id"] for job in jobs]),
+                    current_job_id,
+                    group_path,
+                ),
+                "_member_jobs": jobs,
+                "_max_ended_at": max(_job_end(job) for job in jobs),
             }
         )
-    return groups
+    return nodes
+
+
+def _structure_nodes(jobs: list[dict], current_job_id: str, prefix: str) -> list[dict]:
+    """Graph nodes for one set of sibling jobs (jobs spawned from inside the
+    same enclosing job). The graph models data flow, not just parentage:
+
+    - Siblings that ran sequentially (each started after the previous stage
+      ended) are pipeline stages: each stage nests under the previous stage's
+      node, next to that node's own nested jobs.
+    - Siblings that overlapped in time are parallel branches, side by side.
+    """
+    if not jobs:
+        return []
+    jobs = sorted(
+        jobs,
+        key=lambda job: (
+            job["started_at"] is None,
+            job["started_at"] or 0,
+            job["job_id"],
+        ),
+    )
+    stages: list[list[dict]] = []
+    stage_end = 0.0
+    for job in jobs:
+        sequential = (
+            job["started_at"] is not None
+            and job["started_at"] >= stage_end - _ENDED_AT_STAMP_LAG_SECONDS
+        )
+        if not stages or sequential:
+            stages.append([job])
+            stage_end = _job_end(job)
+        else:
+            stages[-1].append(job)
+            stage_end = max(stage_end, _job_end(job))
+    stage_nodes = [
+        _stage_to_nodes(stage, current_job_id, index, prefix)
+        for index, stage in enumerate(stages)
+    ]
+    # Each later stage consumed the previous stage's output, so it nests under
+    # the previous stage's last-finishing node. Prepended so the pipeline
+    # trunk renders as a straight line with nested branches hanging off it.
+    for prev_nodes, next_nodes in zip(stage_nodes, stage_nodes[1:]):
+        anchor = max(prev_nodes, key=lambda node: node["_max_ended_at"])
+        for node in next_nodes:
+            node["chained"] = True
+        anchor["children"][:0] = next_nodes
+    for nodes in stage_nodes:
+        for node in nodes:
+            del node["_max_ended_at"]
+    return stage_nodes[0]
+
+
+def _workload_groups(job_id: str) -> tuple[dict, list[dict]]:
+    """The grouped tree of the whole workload job_id belongs to, built from
+    its outermost root. Nodes still carry the private _member_jobs rows."""
+    current = _job_or_404(job_id)
+    ancestors = current["ancestors"]
+    root = _job_or_404(ancestors[0]["job_id"]) if ancestors else current
+    groups = _structure_nodes(
+        history.jobs_with_parents([root["job_id"]]), job_id, ""
+    )
+    return root, groups
+
+
+def _drop_member_jobs(nodes: list[dict]):
+    for node in nodes:
+        del node["_member_jobs"]
+        _drop_member_jobs(node["children"])
+
+
+def _find_group(nodes: list[dict], group_path: str) -> dict | None:
+    for node in nodes:
+        if node["group_path"] == group_path:
+            return node
+        found = _find_group(node["children"], group_path)
+        if found is not None:
+            return found
+    return None
 
 
 @router.get("/jobs/{job_id}/tree")
 def job_tree(job_id: str):
-    """The whole workload under one job, grouped by function name per level,
-    for the structure (graph / tree) views."""
-    root = _job_or_404(job_id)
+    """The whole workload the given job belongs to, from its outermost root
+    down, grouped by function name per level, for the graph view. Every member
+    job's page shows the same graph; `contains_current` marks the group holding
+    the requested job."""
+    root, groups = _workload_groups(job_id)
+    _drop_member_jobs(groups)
     return {
         "root": {
-            "job_id": job_id,
+            "job_id": root["job_id"],
             "function_name": root["function_name"],
             "status": root["status"],
             "job_count": 1,
@@ -861,7 +971,62 @@ def job_tree(job_id: str):
                 else 0
             ),
         },
-        "groups": _group_child_jobs([job_id]),
+        "groups": groups,
+    }
+
+
+@router.get("/jobs/{job_id}/tree/members")
+def job_tree_group_members(
+    job_id: str,
+    path: str,
+    status: str | None = None,
+    search: str | None = None,
+    offset: int = 0,
+    limit: int = 15,
+):
+    """The member jobs of one grouped graph node, for the group drawer.
+    Sorted by "needs attention": failed first, then longest-running, then
+    most recent."""
+    _, groups = _workload_groups(job_id)
+    node = _find_group(groups, path)
+    if node is None:
+        raise ManagementAPIError(404, "NOT_FOUND", "Group not found.")
+    members = node["_member_jobs"]
+    status_counts = node["status_counts"]
+    if status:
+        members = [job for job in members if job["status"] == status]
+    if search:
+        needle = search.lower()
+        members = [job for job in members if needle in job["job_id"].lower()]
+    now = time()
+
+    def duration(job: dict) -> float | None:
+        if job["started_at"] is None:
+            return None
+        return (job["ended_at"] or now) - job["started_at"]
+
+    def sort_key(job: dict):
+        attention = {"failed": 0, "running": 1}.get(job["status"], 2)
+        running_longest = -(duration(job) or 0) if attention == 1 else 0
+        return (attention, running_longest, -(job["started_at"] or 0))
+
+    members = sorted(members, key=sort_key)
+    limit = min(max(1, limit), 100)
+    offset = max(0, offset)
+    return {
+        "items": [
+            {
+                "job_id": job["job_id"],
+                "status": job["status"],
+                "input_count": job["n_inputs"],
+                "result_count": job["n_results"],
+                "started_at": _iso(job["started_at"]),
+                "duration_seconds": duration(job),
+            }
+            for job in members[offset : offset + limit]
+        ],
+        "total_count": len(members),
+        "status_counts": status_counts,
     }
 
 
@@ -1124,6 +1289,7 @@ def _call_summary_page(
     offset: int,
     limit: int,
     after_key: tuple | None = None,
+    include_filter_counts: bool = False,
 ) -> dict:
     history_sort = {
         "input_index": "index",
@@ -1150,10 +1316,12 @@ def _call_summary_page(
         after_key,
         status,
         job["status"] == "canceled",
+        include_filter_counts,
     )
     return {
         "total": result["total"],
         "items": [_call_dto(task, job["status"]) for task in result["tasks"]],
+        "filter_counts": result["filter_counts"],
     }
 
 
@@ -1219,6 +1387,7 @@ def list_calls(
         offset=0,
         limit=limit + 1,
         after_key=after_key,
+        include_filter_counts=True,
     )
     has_more = len(result["items"]) > limit
     page = result["items"][:limit]
@@ -1235,6 +1404,7 @@ def list_calls(
         ),
         "has_more": has_more,
         "total_count": result["total"],
+        "filter_counts": result["filter_counts"],
     }
 
 

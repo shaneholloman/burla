@@ -696,6 +696,7 @@ def job_task_summaries(
     after_key: tuple | None = None,
     status: str | None = None,
     job_is_canceled: bool = False,
+    include_filter_counts: bool = False,
 ) -> dict:
     direction = "DESC" if descending else "ASC"
     sort_column = TASK_SUMMARY_SORT_COLUMNS[sort]
@@ -744,6 +745,33 @@ def job_task_summaries(
         has_events = conn.execute(
             "SELECT EXISTS(SELECT 1 FROM call_events WHERE job_id = ?)", (job_id,)
         ).fetchone()[0]
+        filter_counts = None
+        if include_filter_counts:
+            count_params = {
+                **params,
+                "failed_only": 0,
+                "logs_only": 0,
+                "has_metrics": 0,
+                "index": None,
+            }
+            count_cte = _EVENT_SUMMARY_CTE if has_events else _SAMPLE_SUMMARY_CTE
+            counts = conn.execute(
+                count_cte
+                + """
+SELECT COUNT(*),
+    COALESCE(SUM(api_status = 'running'), 0),
+    COALESCE(SUM(api_status = 'failed'), 0),
+    COALESCE(SUM(has_logs), 0)
+FROM flagged
+""",
+                count_params,
+            ).fetchone()
+            filter_counts = {
+                "all": counts[0],
+                "running": counts[1],
+                "failed": counts[2],
+                "has_logs": counts[3],
+            }
         if unfiltered and status is None:
             total = n_inputs
         elif status is not None:
@@ -818,7 +846,7 @@ def job_task_summaries(
                 ],
             }
         )
-    return {"total": total, "tasks": tasks}
+    return {"total": total, "tasks": tasks, "filter_counts": filter_counts}
 
 
 def last_job_metrics_timestamp(job_id: str) -> float | None:
@@ -1491,7 +1519,7 @@ def jobs_with_parents(parent_ids: list[str]) -> list[dict]:
             placeholders = ",".join("?" * len(chunk))
             rows = conn.execute(
                 "SELECT job_id, parent_job_id, function_name, status, n_inputs, "
-                "n_results, started_at, "
+                "n_results, started_at, ended_at, "
                 "json_extract(data, '$.func_cpu'), "
                 "json_extract(data, '$.func_ram'), "
                 "json_extract(data, '$.func_gpu'), "
@@ -1510,10 +1538,11 @@ def jobs_with_parents(parent_ids: list[str]) -> list[dict]:
                         "n_inputs": row[4] or 0,
                         "n_results": row[5] or 0,
                         "started_at": row[6],
-                        "func_cpu": row[7],
-                        "func_ram": row[8],
-                        "func_gpu": row[9],
-                        "max_parallelism": row[10],
+                        "ended_at": row[7],
+                        "func_cpu": row[8],
+                        "func_ram": row[9],
+                        "func_gpu": row[10],
+                        "max_parallelism": row[11],
                     }
                 )
     return jobs

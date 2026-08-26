@@ -9,7 +9,6 @@ import {
     HelpCircle,
 } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Switch } from "@/components/ui/switch";
 import {
     Table,
     TableBody,
@@ -80,6 +79,12 @@ type TaskSummary = {
 type TaskSummaryPage = {
     total: number;
     tasks: TaskSummary[];
+    filter_counts: {
+        all: number;
+        running: number;
+        failed: number;
+        has_logs: number;
+    };
 };
 
 type CallLogEntry = {
@@ -704,8 +709,8 @@ const JobCalls = ({
     const [taskPage, setTaskPage] = useState<TaskSummaryPage | null>(null);
     const [sort, setSort] = useState<SortKey>("started");
     const [descending, setDescending] = useState(true);
-    const [failedOnly, setFailedOnly] = useState(false);
-    const [runningOnly, setRunningOnly] = useState(false);
+    // Status is single-select; "has logs" is orthogonal and combines with it.
+    const [statusFilter, setStatusFilter] = useState<"running" | "failed" | null>(null);
     const [logsOnly, setLogsOnly] = useState(false);
     const [page, setPage] = useState(0);
     const [searchValue, setSearchValue] = useState("");
@@ -728,11 +733,10 @@ const JobCalls = ({
         const params = new URLSearchParams({
             sort: sortMap[sort],
             order: descending ? "desc" : "asc",
-            failed_only: String(failedOnly),
             logs_only: String(logsOnly),
             limit: String(CALLS_PER_PAGE),
         });
-        if (runningOnly) params.set("status", "running");
+        if (statusFilter) params.set("status", statusFilter);
         if (searchIndex != null) params.set("input_index", String(searchIndex));
         const cursor = pageCursors.current[page];
         if (cursor) params.set("cursor", cursor);
@@ -742,14 +746,21 @@ const JobCalls = ({
             setTaskPage({
                 total: payload.total_count ?? 0,
                 tasks: (payload.items ?? []).map(mapCall),
+                filter_counts: payload.filter_counts ?? {
+                    all: 0,
+                    running: 0,
+                    failed: 0,
+                    has_logs: 0,
+                },
             });
         } catch {
             setTaskPage(null);
         }
-    }, [jobId, sort, descending, failedOnly, runningOnly, logsOnly, page, searchIndex]);
+    }, [jobId, sort, descending, statusFilter, logsOnly, page, searchIndex]);
 
+    // Keep the previous job's rows on screen while the new job's page loads:
+    // nulling taskPage here would flash skeletons on every graph navigation.
     useEffect(() => {
-        setTaskPage(null);
         setPage(0);
         setSearchValue("");
         pageCursors.current = { 0: null };
@@ -757,7 +768,7 @@ const JobCalls = ({
 
     useEffect(() => {
         pageCursors.current = { 0: null };
-    }, [sort, descending, failedOnly, runningOnly, logsOnly, searchIndex]);
+    }, [sort, descending, statusFilter, logsOnly, searchIndex]);
 
     useEffect(() => {
         void loadTaskPage();
@@ -778,6 +789,12 @@ const JobCalls = ({
 
     const totalTasks = taskPage?.total ?? 0;
     const totalPages = Math.max(1, Math.ceil(totalTasks / CALLS_PER_PAGE));
+    const filterCounts = taskPage?.filter_counts ?? {
+        all: 0,
+        running: 0,
+        failed: 0,
+        has_logs: 0,
+    };
 
     if (taskIndex != null) {
         return (
@@ -795,7 +812,7 @@ const JobCalls = ({
         <div className="rounded-xl border border-border bg-card shadow-sm">
             <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-2 px-5 py-3.5">
                 <span className="text-sm font-semibold text-foreground">Function calls</span>
-                <div className="flex flex-wrap items-center gap-5">
+                <div className="flex flex-wrap items-center gap-3">
                     <input
                         type="text"
                         inputMode="numeric"
@@ -807,38 +824,69 @@ const JobCalls = ({
                         placeholder="Filter by input index"
                         className="h-7 w-44 rounded-md border border-border bg-background px-2.5 text-[13px] tabular-nums text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                     />
-                    <label className="flex cursor-pointer items-center gap-2 text-[13px] text-muted-foreground">
-                        <Switch
-                            checked={logsOnly}
-                            onCheckedChange={(checked) => {
-                                setLogsOnly(checked);
+                    {/* Same chip language as the group drawer: status is
+                        single-select, "Has logs" combines with any status. */}
+                    <div className="flex items-center gap-1.5">
+                        {(
+                            [
+                                { label: "All", value: null, count: filterCounts.all },
+                                {
+                                    label: "Running",
+                                    value: "running",
+                                    count: filterCounts.running,
+                                },
+                                {
+                                    label: "Failed",
+                                    value: "failed",
+                                    count: filterCounts.failed,
+                                },
+                            ] as const
+                        ).map(({ label, value, count }) => {
+                            const active = statusFilter === value;
+                            return (
+                            <button
+                                key={label}
+                                type="button"
+                                disabled={count === 0 && !active}
+                                onClick={() => {
+                                    setStatusFilter(value);
+                                    setPage(0);
+                                }}
+                                className={cn(
+                                    "rounded-full border px-2.5 py-1 text-[12px] font-medium leading-none transition-colors",
+                                    statusFilter === value
+                                        ? "border-primary/40 bg-primary/10 text-primary"
+                                        : "border-border text-muted-foreground hover:text-foreground",
+                                    count === 0 && !active && "opacity-45"
+                                )}
+                            >
+                                {label} <span className="tabular-nums">{count.toLocaleString()}</span>
+                            </button>
+                            );
+                        })}
+                        <span className="mx-1 h-4 w-px bg-border" />
+                        <button
+                            type="button"
+                            disabled={filterCounts.has_logs === 0 && !logsOnly}
+                            onClick={() => {
+                                setLogsOnly((checked) => !checked);
                                 setPage(0);
                             }}
-                        />
-                        <span className="whitespace-nowrap">Has logs</span>
-                    </label>
-                    <label className="flex cursor-pointer items-center gap-2 text-[13px] text-muted-foreground">
-                        <Switch
-                            checked={failedOnly}
-                            onCheckedChange={(checked) => {
-                                setFailedOnly(checked);
-                                if (checked) setRunningOnly(false);
-                                setPage(0);
-                            }}
-                        />
-                        <span className="whitespace-nowrap">Failed only</span>
-                    </label>
-                    <label className="flex cursor-pointer items-center gap-2 text-[13px] text-muted-foreground">
-                        <Switch
-                            checked={runningOnly}
-                            onCheckedChange={(checked) => {
-                                setRunningOnly(checked);
-                                if (checked) setFailedOnly(false);
-                                setPage(0);
-                            }}
-                        />
-                        <span className="whitespace-nowrap">Running only</span>
-                    </label>
+                            aria-pressed={logsOnly}
+                            className={cn(
+                                "rounded-full border px-2.5 py-1 text-[12px] font-medium leading-none transition-colors",
+                                logsOnly
+                                    ? "border-primary/40 bg-primary/10 text-primary"
+                                    : "border-border text-muted-foreground hover:text-foreground",
+                                filterCounts.has_logs === 0 && !logsOnly && "opacity-45"
+                            )}
+                        >
+                            Has logs{" "}
+                            <span className="tabular-nums">
+                                {filterCounts.has_logs.toLocaleString()}
+                            </span>
+                        </button>
+                    </div>
                 </div>
             </div>
 
@@ -851,17 +899,17 @@ const JobCalls = ({
             ) : taskPage.tasks.length === 0 ? (
                 <div className="border-t border-border/70 px-5 py-6">
                     <p className="text-sm font-medium text-foreground">
-                        {runningOnly
-                            ? "No running calls"
-                            : failedOnly
+                        {statusFilter === "failed"
                             ? "No failed calls"
+                            : statusFilter === "running"
+                            ? "No running calls"
                             : logsOnly
                             ? "No calls with logs"
                             : searchIndex != null
                             ? `No call with input index ${searchIndex.toLocaleString()}`
                             : "No call data"}
                     </p>
-                    {!runningOnly && !failedOnly && !logsOnly && searchIndex == null && (
+                    {statusFilter == null && !logsOnly && searchIndex == null && (
                         <p className="mt-1 text-[13px] text-muted-foreground">
                             {isLive
                                 ? "Calls appear here once their first samples or logs arrive."

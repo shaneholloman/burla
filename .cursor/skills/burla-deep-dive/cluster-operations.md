@@ -72,8 +72,8 @@ In [main_service/src/main_service/node.py](../../../main_service/src/main_servic
 
 In [node_service/src/node_service/lifecycle_endpoints.py](../../../node_service/src/node_service/lifecycle_endpoints.py). Runs at node startup (from `lifespan`) and on `POST /reboot`.
 
-1. Stop the current job watcher, then push `status: "BOOTING"` (with `current_job: None` and a fresh `started_booting_at`) to the head. The head refuses to downgrade a terminal status, so if the push response comes back `DELETED` or `FAILED` the node was deleted or failed externally and the boot aborts. `REINIT_SELF` resets in-memory state, preserving `current_container_config` and `reserved_for_job`.
-2. Fetch the list of authorized users from `backend.burla.dev/v1/clusters/{project_id}/users` using `CLUSTER_ID_TOKEN` (a plain env var; services no longer read Secret Manager). Cache in `SELF["authorized_users"]`.
+1. Stop the current job watcher, then push `status: "BOOTING"` (with `current_job: None` and a fresh `started_booting_at`) to the head. The head refuses to downgrade a terminal status, so if the push response comes back `DELETED` or `FAILED` the node was deleted or failed externally and the boot aborts. `REINIT_SELF` resets in-memory state, preserving `current_container_config`, `reserved_for_job`, and the last known authorized-user list.
+2. Refresh the authorized-user list from `backend.burla.dev/v1/clusters/{project_id}/users` using `CLUSTER_ID_TOKEN` with four bounded attempts. A later reboot can continue with its cached list during a backend outage; initial boot still fails because it has no previously validated users.
 3. Wipe existing worker containers: `kill` them, then schedule `remove` as a background task so reboot isn't blocked by slow GPU-container teardown. (One code path in every mode: workers always live on the node's own docker daemon.)
 4. Pull new images (`_pull_image_if_missing`: the `docker pull` CLI with up to 5 retries on "unexpected EOF", same in every mode).
 5. Create `WorkerClient` instances: one per CPU (or one per GPU if `NUM_GPUS > 0`).

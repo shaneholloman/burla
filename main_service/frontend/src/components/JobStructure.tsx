@@ -451,13 +451,20 @@ const StructureGraph = ({
         const anchorFrom = anchorTo
             ? layoutRef.current.nodes.find((p) => nodeKey(p) === nodeKey(anchorTo))
             : undefined;
-        let anchorViewportX: number | null = null;
+        // Pin any anchor that is at least partially visible; if it sits in an
+        // edge zone, ease it into the safe band as part of the same tween
+        // (one continuous motion, never a correction pass afterwards). Fully
+        // off-screen anchors scroll into view once the motion settles.
+        let anchorPin: { fromViewportX: number; toViewportX: number } | null = null;
         if (el && anchorTo && anchorFrom) {
             const viewportX = anchorFrom.x + CANVAS_PAD - el.scrollLeft;
-            // Only pin anchors that are actually on screen; off-screen ones
-            // get scrolled into view once the motion settles instead.
-            if (viewportX >= 0 && viewportX <= el.clientWidth - NODE_W) {
-                anchorViewportX = viewportX;
+            if (viewportX > -NODE_W && viewportX < el.clientWidth) {
+                const safeMin = EDGE_FADE_WIDTH;
+                const safeMax = Math.max(safeMin, el.clientWidth - NODE_W - EDGE_FADE_WIDTH);
+                anchorPin = {
+                    fromViewportX: viewportX,
+                    toViewportX: Math.min(Math.max(viewportX, safeMin), safeMax),
+                };
             }
         }
 
@@ -470,15 +477,18 @@ const StructureGraph = ({
                     ? 0
                     : Math.min(1, (elapsed - LAYOUT_ANIMATION_MS) / 180);
             setLayout(interpolateLayout(from, target, geoT, fadeT));
-            if (el && anchorViewportX != null && anchorTo && anchorFrom) {
+            if (el && anchorPin && anchorTo && anchorFrom) {
                 const anchorX = anchorFrom.x + (anchorTo.x - anchorFrom.x) * geoT;
-                el.scrollLeft = Math.max(0, anchorX + CANVAS_PAD - anchorViewportX);
+                const viewportX =
+                    anchorPin.fromViewportX +
+                    (anchorPin.toViewportX - anchorPin.fromViewportX) * geoT;
+                el.scrollLeft = Math.max(0, anchorX + CANVAS_PAD - viewportX);
             }
             if (elapsed < LAYOUT_ANIMATION_MS + 180) {
                 frameRef.current = requestAnimationFrame(step);
                 return;
             }
-            if (el && anchorTo && anchorViewportX == null) {
+            if (el && anchorTo && anchorPin == null) {
                 const nodeLeft = anchorTo.x + CANVAS_PAD;
                 const nodeRight = nodeLeft + NODE_W;
                 const safeLeft = el.scrollLeft + EDGE_FADE_WIDTH;

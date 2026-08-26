@@ -493,6 +493,7 @@ const GroupDrawer = ({
         <button
             key={label}
             type="button"
+            disabled={count === 0}
             onClick={() => {
                 setStatusFilter(value);
                 setPage(0);
@@ -501,7 +502,8 @@ const GroupDrawer = ({
                 "rounded-full border px-2.5 py-1 text-[12px] font-medium leading-none transition-colors",
                 statusFilter === value
                     ? "border-primary/40 bg-primary/10 text-primary"
-                    : "border-border text-muted-foreground hover:text-foreground"
+                    : "border-border text-muted-foreground hover:text-foreground",
+                count === 0 && "opacity-45"
             )}
         >
             {label} <span className="tabular-nums">{count.toLocaleString()}</span>
@@ -541,10 +543,10 @@ const GroupDrawer = ({
 
                 <div className="flex flex-wrap gap-1.5 px-5 pt-4">
                     {chip("All", allCount, null)}
-                    {CHIP_ORDER.filter((status) => statusCounts[status]).map((status) =>
+                    {CHIP_ORDER.map((status) =>
                         chip(
                             status.charAt(0).toUpperCase() + status.slice(1),
-                            statusCounts[status],
+                            statusCounts[status] ?? 0,
                             status
                         )
                     )}

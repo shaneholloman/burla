@@ -183,15 +183,10 @@ const JobDetails = () => {
         return () => window.clearInterval(id);
     }, [isLiveJob]);
 
-    useEffect(() => {
-        setStats(null);
-        setStatsLoadError(false);
-        setIsStatsLoading(true);
-        setFetchedJob(null);
-        setJobEvents([]);
-        setAncestors([]);
-        hasCompletedInitialStatsLoadRef.current = false;
-    }, [jobId]);
+    // Navigating between jobs (graph nodes, breadcrumbs) deliberately does NOT
+    // reset to the loading screen: the page stays mounted, keeping layout and
+    // the graph's scroll position, and the new job's data swaps in when its
+    // fetch lands. Only the very first load shows the spinner.
 
     // Job-level notices (e.g. "Job canceled by user"): not function calls, so
     // they render in a quiet events strip instead of the call table.
@@ -404,7 +399,7 @@ const JobDetails = () => {
                         </span>
                     ))}
                     <ChevronRight className="h-3.5 w-3.5 shrink-0" />
-                    <span className="truncate font-mono text-xs">{job.id}</span>
+                    <span className="truncate font-mono text-xs">{jobId}</span>
                 </nav>
 
                 {/* Title row */}
@@ -550,12 +545,12 @@ const JobDetails = () => {
                             to; hidden for jobs with no nested structure. Not
                             keyed on job id: navigating between jobs in one
                             workload keeps the same graph mounted in place. */}
-                        <JobStructure jobId={job.id} />
+                        <JobStructure jobId={jobId} />
 
                         {/* Function calls */}
                         <div className="mb-4">
                             <JobCalls
-                                jobId={job.id}
+                                jobId={jobId}
                                 jobStatus={job.status}
                                 taskIndex={selectedTaskIndex}
                                 onSelectTask={selectTask}
@@ -565,7 +560,7 @@ const JobDetails = () => {
                     </div>
                 ) : (
                     <div className="mt-5">
-                        <JobUtilization jobId={job.id} jobStatus={job.status} />
+                        <JobUtilization jobId={jobId} jobStatus={job.status} />
                     </div>
                 )}
             </div>

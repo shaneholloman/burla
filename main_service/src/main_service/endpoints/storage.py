@@ -64,7 +64,7 @@ def normalize_directory_path(raw_path: Optional[str]) -> str:
 def validate_entry_name(name: Optional[str]) -> str:
     if not name:
         raise ValueError("Name is required")
-    if any(separator in name for separator in ("/", "\\")):
+    if "/" in name:
         raise ValueError("Name cannot contain path separators")
     if name in (".", ".."):
         raise ValueError("Name is not allowed")

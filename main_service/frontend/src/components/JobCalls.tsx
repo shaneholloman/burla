@@ -78,6 +78,12 @@ type TaskSummary = {
 type TaskSummaryPage = {
     total: number;
     tasks: TaskSummary[];
+    filter_counts: {
+        all: number;
+        running: number;
+        failed: number;
+        has_logs: number;
+    };
 };
 
 type CallLogEntry = {
@@ -730,6 +736,12 @@ const JobCalls = ({
             setTaskPage({
                 total: payload.total_count ?? 0,
                 tasks: (payload.items ?? []).map(mapCall),
+                filter_counts: payload.filter_counts ?? {
+                    all: 0,
+                    running: 0,
+                    failed: 0,
+                    has_logs: 0,
+                },
             });
         } catch {
             setTaskPage(null);
@@ -766,6 +778,12 @@ const JobCalls = ({
 
     const totalTasks = taskPage?.total ?? 0;
     const totalPages = Math.max(1, Math.ceil(totalTasks / CALLS_PER_PAGE));
+    const filterCounts = taskPage?.filter_counts ?? {
+        all: 0,
+        running: 0,
+        failed: 0,
+        has_logs: 0,
+    };
 
     if (taskIndex != null) {
         return (
@@ -800,14 +818,25 @@ const JobCalls = ({
                     <div className="flex items-center gap-1.5">
                         {(
                             [
-                                { label: "All", value: null },
-                                { label: "Running", value: "running" },
-                                { label: "Failed", value: "failed" },
+                                { label: "All", value: null, count: filterCounts.all },
+                                {
+                                    label: "Running",
+                                    value: "running",
+                                    count: filterCounts.running,
+                                },
+                                {
+                                    label: "Failed",
+                                    value: "failed",
+                                    count: filterCounts.failed,
+                                },
                             ] as const
-                        ).map(({ label, value }) => (
+                        ).map(({ label, value, count }) => {
+                            const active = statusFilter === value;
+                            return (
                             <button
                                 key={label}
                                 type="button"
+                                disabled={count === 0 && !active}
                                 onClick={() => {
                                     setStatusFilter(value);
                                     setPage(0);
@@ -816,15 +845,18 @@ const JobCalls = ({
                                     "rounded-full border px-2.5 py-1 text-[12px] font-medium leading-none transition-colors",
                                     statusFilter === value
                                         ? "border-primary/40 bg-primary/10 text-primary"
-                                        : "border-border text-muted-foreground hover:text-foreground"
+                                        : "border-border text-muted-foreground hover:text-foreground",
+                                    count === 0 && !active && "opacity-45"
                                 )}
                             >
-                                {label}
+                                {label} <span className="tabular-nums">{count.toLocaleString()}</span>
                             </button>
-                        ))}
+                            );
+                        })}
                         <span className="mx-1 h-4 w-px bg-border" />
                         <button
                             type="button"
+                            disabled={filterCounts.has_logs === 0 && !logsOnly}
                             onClick={() => {
                                 setLogsOnly((checked) => !checked);
                                 setPage(0);
@@ -834,10 +866,14 @@ const JobCalls = ({
                                 "rounded-full border px-2.5 py-1 text-[12px] font-medium leading-none transition-colors",
                                 logsOnly
                                     ? "border-primary/40 bg-primary/10 text-primary"
-                                    : "border-border text-muted-foreground hover:text-foreground"
+                                    : "border-border text-muted-foreground hover:text-foreground",
+                                filterCounts.has_logs === 0 && !logsOnly && "opacity-45"
                             )}
                         >
-                            Has logs
+                            Has logs{" "}
+                            <span className="tabular-nums">
+                                {filterCounts.has_logs.toLocaleString()}
+                            </span>
                         </button>
                     </div>
                 </div>

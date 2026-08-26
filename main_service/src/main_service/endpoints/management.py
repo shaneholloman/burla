@@ -1289,6 +1289,7 @@ def _call_summary_page(
     offset: int,
     limit: int,
     after_key: tuple | None = None,
+    include_filter_counts: bool = False,
 ) -> dict:
     history_sort = {
         "input_index": "index",
@@ -1315,10 +1316,12 @@ def _call_summary_page(
         after_key,
         status,
         job["status"] == "canceled",
+        include_filter_counts,
     )
     return {
         "total": result["total"],
         "items": [_call_dto(task, job["status"]) for task in result["tasks"]],
+        "filter_counts": result["filter_counts"],
     }
 
 
@@ -1384,6 +1387,7 @@ def list_calls(
         offset=0,
         limit=limit + 1,
         after_key=after_key,
+        include_filter_counts=True,
     )
     has_more = len(result["items"]) > limit
     page = result["items"][:limit]
@@ -1400,6 +1404,7 @@ def list_calls(
         ),
         "has_more": has_more,
         "total_count": result["total"],
+        "filter_counts": result["filter_counts"],
     }
 
 

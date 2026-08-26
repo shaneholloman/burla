@@ -244,9 +244,10 @@ const GraphNodeCard = ({
     );
     const clickable = isGroup || (node.job_id && !isCurrent);
     const innerClassName = cn(
-        "relative flex h-full w-full flex-col justify-center rounded-lg border bg-[hsl(var(--graph-node))] px-3.5 text-left shadow-md transition-colors",
-        isCurrent ? "border-primary ring-1 ring-primary/30" : "border-border",
-        clickable && "cursor-pointer hover:border-primary/60"
+        "relative flex h-full w-full flex-col justify-center rounded-lg bg-[hsl(var(--graph-node))] px-3.5 text-left shadow-md transition-shadow",
+        // The current job wears the only outline on the canvas.
+        isCurrent && "ring-2 ring-primary",
+        clickable && "cursor-pointer hover:ring-1 hover:ring-primary/50"
     );
     const title = [
         isGroup ? `View ${node.job_count.toLocaleString()} jobs` : node.function_name,
@@ -276,7 +277,7 @@ const GraphNodeCard = ({
             {isGroup && (
                 <span
                     aria-hidden
-                    className="absolute inset-0 translate-x-[5px] translate-y-[5px] rounded-lg border border-border bg-[hsl(var(--graph-node))] shadow-sm"
+                    className="absolute inset-0 translate-x-[5px] translate-y-[5px] rounded-lg bg-[hsl(var(--graph-node))] brightness-90 shadow-sm"
                 />
             )}
             {inner}
@@ -358,7 +359,7 @@ const StructureGraph = ({
                         <div
                             key={region.key}
                             className={cn(
-                                "pointer-events-none absolute rounded-lg border border-muted-foreground/50",
+                                "pointer-events-none absolute rounded-xl",
                                 region.depth % 2 === 0
                                     ? "bg-[hsl(var(--graph-well-1))]"
                                     : "bg-[hsl(var(--graph-well-2))]"

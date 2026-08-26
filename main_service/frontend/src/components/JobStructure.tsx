@@ -47,9 +47,11 @@ interface GroupMembersResponse {
     status_counts: Record<string, number>;
 }
 
+// Completed is deliberately absent: the default outcome stays silent (the
+// calls counter already shows progress), so a dot on a card always means
+// something needs attention or is happening now.
 const STATUS_DOTS: { status: string; className: string; pulse?: boolean }[] = [
     { status: "running", className: "bg-primary", pulse: true },
-    { status: "completed", className: "bg-emerald-500 dark:bg-emerald-400" },
     { status: "failed", className: "bg-destructive" },
     { status: "canceled", className: "bg-muted-foreground/60" },
 ];
@@ -222,7 +224,7 @@ const GraphNodeCard = ({
                     {node.function_name}
                 </span>
                 {isGroup && (
-                    <span className="shrink-0 rounded-full border border-border bg-muted/60 px-1.5 py-[1px] text-[11px] font-medium tabular-nums text-muted-foreground">
+                    <span className="shrink-0 text-[11px] font-medium tabular-nums text-muted-foreground">
                         ×{node.job_count.toLocaleString()}
                     </span>
                 )}
@@ -342,7 +344,7 @@ const StructureGraph = ({
                     className="min-w-full w-max bg-background p-6"
                     style={{
                         backgroundImage:
-                            "radial-gradient(hsl(var(--border) / 0.7) 1px, transparent 1px)",
+                            "radial-gradient(hsl(var(--border) / 0.6) 1px, transparent 1px)",
                         backgroundSize: "22px 22px",
                     }}
                 >
@@ -391,7 +393,7 @@ const StructureGraph = ({
                             >
                                 <path
                                     d="M0,0 L6,3 L0,6 Z"
-                                    style={{ fill: "hsl(var(--muted-foreground))", fillOpacity: 0.55 }}
+                                    style={{ fill: "hsl(var(--muted-foreground))", fillOpacity: 0.7 }}
                                 />
                             </marker>
                         </defs>
@@ -408,7 +410,7 @@ const StructureGraph = ({
                                     key={to.node.group_path}
                                     d={path}
                                     fill="none"
-                                    className="stroke-muted-foreground/55"
+                                    className="stroke-muted-foreground/70"
                                     strokeWidth={1.5}
                                     markerEnd="url(#arrow-flow)"
                                 />
@@ -544,7 +546,7 @@ const GroupDrawer = ({
                         <span className="truncate font-mono text-sm font-semibold text-foreground">
                             {node.function_name}
                         </span>
-                        <span className="shrink-0 rounded-full border border-border bg-muted/60 px-1.5 py-[1px] text-[11px] font-medium tabular-nums text-muted-foreground">
+                        <span className="shrink-0 text-[11px] font-medium tabular-nums text-muted-foreground">
                             ×{node.job_count.toLocaleString()}
                         </span>
                     </div>

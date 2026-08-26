@@ -662,3 +662,13 @@
   --graph-well-1: 207 38% 13%;
   --graph-well-2: 208 42% 7.5%;
 }
+
+/* Running jobs breathe: motion, not color, distinguishes in-progress from
+   done in the graph's status dots. */
+@keyframes graph-breathe {
+  0%, 100% { transform: scale(1); opacity: 0.55; }
+  50% { transform: scale(1.45); opacity: 1; }
+}
+.graph-breathe {
+  animation: graph-breathe 2.2s ease-in-out infinite;
+}

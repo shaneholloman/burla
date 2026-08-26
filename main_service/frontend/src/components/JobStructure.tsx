@@ -47,24 +47,24 @@ interface GroupMembersResponse {
     status_counts: Record<string, number>;
 }
 
-// Completed is deliberately absent: the default outcome stays silent (the
-// calls counter already shows progress), so a dot on a card always means
-// something needs attention or is happening now.
-const STATUS_DOTS: { status: string; className: string; pulse?: boolean }[] = [
-    { status: "running", className: "bg-primary", pulse: true },
+// Running and completed share one healthy green; motion is what says "still
+// going": running dots breathe, finished dots hold still.
+const STATUS_DOTS: { status: string; className: string; breathe?: boolean }[] = [
+    { status: "running", className: "bg-emerald-500 dark:bg-emerald-400", breathe: true },
+    { status: "completed", className: "bg-emerald-500 dark:bg-emerald-400" },
     { status: "failed", className: "bg-destructive" },
     { status: "canceled", className: "bg-muted-foreground/60" },
 ];
 
 const StatusDots = ({ counts }: { counts: Record<string, number> }) => (
     <span className="inline-flex items-center gap-2.5">
-        {STATUS_DOTS.filter(({ status }) => counts[status]).map(({ status, className, pulse }) => (
+        {STATUS_DOTS.filter(({ status }) => counts[status]).map(({ status, className, breathe }) => (
             <span
                 key={status}
                 title={`${counts[status].toLocaleString()} ${status}`}
                 className="inline-flex items-center gap-1 text-[11px] tabular-nums text-muted-foreground"
             >
-                <span className={cn("h-1.5 w-1.5 rounded-full", className, pulse && "animate-pulse")} />
+                <span className={cn("h-1.5 w-1.5 rounded-full", className, breathe && "graph-breathe")} />
                 {counts[status].toLocaleString()}
             </span>
         ))}
@@ -207,10 +207,12 @@ const GraphNodeCard = ({
     placed,
     currentJobId,
     onOpenGroup,
+    onReveal,
 }: {
     placed: PlacedNode;
     currentJobId: string;
     onOpenGroup: (node: StructureNode) => void;
+    onReveal: (element: HTMLElement, rightOverflow?: number) => void;
 }) => {
     const { node, x, y } = placed;
     // The job whose page is showing: highlighted, not a link.
@@ -258,11 +260,22 @@ const GraphNodeCard = ({
         .filter(Boolean)
         .join("\n");
     const inner = isGroup ? (
-        <button type="button" onClick={() => onOpenGroup(node)} className={innerClassName}>
+        <button
+            type="button"
+            onClick={(event) => {
+                onReveal(event.currentTarget, 5);
+                onOpenGroup(node);
+            }}
+            className={innerClassName}
+        >
             {body}
         </button>
     ) : node.job_id && !isCurrent ? (
-        <Link to={`/jobs/${node.job_id}`} className={innerClassName}>
+        <Link
+            to={`/jobs/${node.job_id}`}
+            onClick={(event) => onReveal(event.currentTarget)}
+            className={innerClassName}
+        >
             {body}
         </Link>
     ) : (
@@ -290,6 +303,7 @@ const GraphNodeCard = ({
 // Room for the 6px arrowhead between the line's end and the node's edge: the
 // line ends at the back of the head, like a shaft meeting an arrowhead.
 const EDGE_INSET = 7;
+const EDGE_FADE_WIDTH = 40;
 
 const StructureGraph = ({
     root,
@@ -312,6 +326,20 @@ const StructureGraph = ({
             left: el.scrollLeft > 1,
             right: el.scrollLeft + el.clientWidth < el.scrollWidth - 1,
         });
+    };
+
+    const revealNode = (element: HTMLElement, rightOverflow = 0) => {
+        const el = scrollRef.current!;
+        const viewport = el.getBoundingClientRect();
+        const node = element.getBoundingClientRect();
+        const safeLeft = viewport.left + EDGE_FADE_WIDTH;
+        const safeRight = viewport.right - EDGE_FADE_WIDTH;
+        let delta = 0;
+        if (node.left < safeLeft) delta = node.left - safeLeft;
+        else if (node.right + rightOverflow > safeRight) {
+            delta = node.right + rightOverflow - safeRight;
+        }
+        if (delta !== 0) el.scrollBy({ left: delta, behavior: "smooth" });
     };
 
     // Center "you are here" on first render only: later navigation within the
@@ -423,6 +451,7 @@ const StructureGraph = ({
                             placed={placed}
                             currentJobId={currentJobId}
                             onOpenGroup={onOpenGroup}
+                            onReveal={revealNode}
                         />
                     ))}
                     </div>

@@ -67,33 +67,61 @@ const GAP_Y = 20;
 interface LaidOutNode {
     node: StructureNode;
     depth: number;
+    row: number;
     x: number;
     y: number;
     parent: LaidOutNode | null;
 }
 
-// Leaves stack top-to-bottom; a parent aligns with its first child (the
-// pipeline continuation, which the API puts first), so a chain of sequential
-// stages renders as one straight row with nested branches hanging below it.
-// Deterministic, so polling re-renders never shift the layout unless the
-// structure itself changed.
+// Column-sweep layout. A node's first child continues its row (the API puts
+// the pipeline continuation first), so a chain of sequential stages renders
+// as one straight line. Every other child is a branch, packed onto the first
+// row below its parent that is still empty from its column onward, so
+// branches sit tight under their junction with no blank rows. Deterministic,
+// so polling re-renders never shift the layout unless the structure changed.
 const layOutTree = (root: StructureNode): LaidOutNode[] => {
-    const nodes: LaidOutNode[] = [];
-    let nextLeafSlot = 0;
-    const place = (node: StructureNode, depth: number, parent: LaidOutNode | null): LaidOutNode => {
-        const laidOut: LaidOutNode = { node, depth, x: depth * (NODE_W + GAP_X), y: 0, parent };
-        nodes.push(laidOut);
-        if (node.children.length === 0) {
-            laidOut.y = nextLeafSlot * (NODE_H + GAP_Y);
-            nextLeafSlot += 1;
-        } else {
-            const childYs = node.children.map((child) => place(child, depth + 1, laidOut).y);
-            laidOut.y = childYs[0];
-        }
-        return laidOut;
+    const laid: LaidOutNode[] = [];
+    const rightmostByRow: number[] = [];
+    const branchesByCol: { node: StructureNode; parent: LaidOutNode }[][] = [];
+    let maxCol = 0;
+
+    const spineEnd = (node: StructureNode, col: number): number =>
+        node.children.length === 0 ? col : spineEnd(node.children[0], col + 1);
+
+    const placeSpine = (node: StructureNode, col: number, row: number, parent: LaidOutNode | null) => {
+        const laidOut: LaidOutNode = {
+            node,
+            depth: col,
+            row,
+            x: col * (NODE_W + GAP_X),
+            y: row * (NODE_H + GAP_Y),
+            parent,
+        };
+        laid.push(laidOut);
+        maxCol = Math.max(maxCol, col);
+        rightmostByRow[row] = Math.max(rightmostByRow[row] ?? -1, col);
+        node.children.forEach((child, index) => {
+            if (index === 0) {
+                placeSpine(child, col + 1, row, laidOut);
+            } else {
+                (branchesByCol[col + 1] ??= []).push({ node: child, parent: laidOut });
+            }
+        });
     };
-    place(root, 0, null);
-    return nodes;
+
+    placeSpine(root, 0, 0, null);
+    // Left-to-right so a branch never steals a row from anything to its left.
+    for (let col = 1; col <= maxCol; col++) {
+        for (const { node, parent } of branchesByCol[col] ?? []) {
+            let row = parent.row + 1;
+            while ((rightmostByRow[row] ?? -1) >= col) row += 1;
+            // Reserve the branch's whole continuation line up front so later
+            // branches can't be packed into the middle of it.
+            rightmostByRow[row] = spineEnd(node, col);
+            placeSpine(node, col, row, parent);
+        }
+    }
+    return laid;
 };
 
 const GraphNodeCard = ({ laidOut, currentJobId }: { laidOut: LaidOutNode; currentJobId: string }) => {

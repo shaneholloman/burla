@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { ChevronDown, ChevronRight, X } from "lucide-react";
+import { ChevronRight, ListTree, X } from "lucide-react";
 import { managementJson } from "@/lib/managementApi";
 import { StatusBadge, jobStatusBadge } from "@/components/StatusBadge";
 import { TablePagination } from "@/components/TablePagination";
@@ -220,14 +220,12 @@ const GraphNodeCard = ({
     onOpenGroup,
     onReveal,
     isExpanded,
-    onToggleExpand,
 }: {
     placed: PlacedNode;
     currentJobId: string;
     onOpenGroup: (node: StructureNode) => void;
     onReveal: (element: HTMLElement, rightOverflow?: number) => void;
     isExpanded: boolean;
-    onToggleExpand: (node: StructureNode) => void;
 }) => {
     const { node, x, y } = placed;
     const isRoot = node.group_path == null;
@@ -245,6 +243,22 @@ const GraphNodeCard = ({
                 {isGroup && (
                     <span className="shrink-0 text-[11px] font-medium tabular-nums text-muted-foreground">
                         ×{node.job_count.toLocaleString()}
+                    </span>
+                )}
+                {/* Nested-jobs indicator: this job contains N jobs; its region
+                    opens while the job is being viewed. */}
+                {!isRoot && insideCount > 0 && (
+                    <span
+                        title={`Contains ${insideCount.toLocaleString()} nested job${insideCount === 1 ? "" : "s"}`}
+                        className={cn(
+                            "ml-auto inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-[3px] text-[11px] font-semibold tabular-nums",
+                            isExpanded
+                                ? "bg-primary/15 text-primary"
+                                : "bg-[hsl(var(--graph-well-1))] text-muted-foreground"
+                        )}
+                    >
+                        <ListTree className="h-3.5 w-3.5" />
+                        {insideCount.toLocaleString()}
                     </span>
                 )}
             </div>
@@ -313,30 +327,6 @@ const GraphNodeCard = ({
                 />
             )}
             {inner}
-            {/* Disclosure chip on the card's bottom edge, where the region
-                attaches: shows how many jobs run inside, toggles the region. */}
-            {!isRoot && insideCount > 0 && (
-                <button
-                    type="button"
-                    onClick={(event) => {
-                        event.stopPropagation();
-                        onToggleExpand(node);
-                    }}
-                    title={
-                        isExpanded
-                            ? "Collapse nested jobs"
-                            : `Show ${insideCount.toLocaleString()} nested job${insideCount === 1 ? "" : "s"}`
-                    }
-                    className="absolute -bottom-[10px] left-3 z-10 flex items-center gap-0.5 rounded-full bg-[hsl(var(--graph-well-1))] px-2 py-[3px] text-[10px] font-semibold tabular-nums text-muted-foreground shadow-sm transition-colors hover:text-foreground"
-                >
-                    {isExpanded ? (
-                        <ChevronDown className="h-3 w-3" />
-                    ) : (
-                        <ChevronRight className="h-3 w-3" />
-                    )}
-                    {insideCount.toLocaleString()}
-                </button>
-            )}
         </div>
     );
 };
@@ -351,14 +341,13 @@ const StructureGraph = ({
     currentJobId,
     onOpenGroup,
     expanded,
-    onToggleExpand,
 }: {
     root: StructureNode;
     currentJobId: string;
     onOpenGroup: (node: StructureNode) => void;
     expanded: Set<string>;
-    onToggleExpand: (node: StructureNode) => void;
 }) => {
+    const navigate = useNavigate();
     const layout = useMemo(
         () =>
             layOutWorkload(
@@ -422,9 +411,17 @@ const StructureGraph = ({
                 className="graph-scroll overflow-x-auto rounded-xl"
             >
                 {/* Recessed canvas: darker than the node cards in both themes
-                    so the cards float, with the dot grid kept faint. */}
+                    so the cards float, with the dot grid kept faint. Clicking
+                    the empty canvas deselects: back to the root job, which
+                    collapses every open region. */}
                 <div
                     className="min-w-full w-max bg-background p-6"
+                    onClick={(event) => {
+                        if ((event.target as HTMLElement).closest("a,button")) return;
+                        if (root.job_id && currentJobId !== root.job_id) {
+                            navigate(`/jobs/${root.job_id}`);
+                        }
+                    }}
                     style={{
                         backgroundImage:
                             "radial-gradient(hsl(var(--border) / 0.6) 1px, transparent 1px)",
@@ -518,7 +515,6 @@ const StructureGraph = ({
                                 placed.node.group_path == null ||
                                 expanded.has(placed.node.group_path)
                             }
-                            onToggleExpand={onToggleExpand}
                         />
                     ))}
                     </div>
@@ -771,18 +767,18 @@ const findGroup = (nodes: StructureNode[], path: string): StructureNode | null =
     return null;
 };
 
-// The region owners standing between the root and the target node: each one
-// must be expanded for the target to be visible. Descending a chained edge
-// stays in the same region, so it adds no owner.
-const ownersToTarget = (
+// The target node plus the region owners standing between the root and it:
+// each owner must be expanded for the target to be visible. Descending a
+// chained edge stays in the same region, so it adds no owner.
+const pathToTarget = (
     node: StructureNode,
     isTarget: (candidate: StructureNode) => boolean,
     owners: string[]
-): string[] | null => {
-    if (isTarget(node)) return owners;
+): { owners: string[]; node: StructureNode } | null => {
+    if (isTarget(node)) return { owners, node };
     for (const child of node.children) {
         const nextOwners = child.chained ? owners : [...owners, node.group_path ?? "root"];
-        const found = ownersToTarget(child, isTarget, nextOwners);
+        const found = pathToTarget(child, isTarget, nextOwners);
         if (found) return found;
     }
     return null;
@@ -832,37 +828,27 @@ export const JobStructure = ({ jobId }: { jobId: string }) => {
         [root, groupPath]
     );
 
-    // Nodes with nested jobs start collapsed (except the root). Ancestors of
-    // the job being viewed (and of an open drawer's group) auto-expand so
-    // deep links never land on a hidden node.
-    const [expanded, setExpanded] = useState<Set<string>>(new Set());
-    useEffect(() => {
-        if (!root) return;
-        const required = [
-            ...(ownersToTarget(
-                root,
-                (node) => node.job_id === jobId || !!node.contains_current,
-                []
-            ) ?? []),
-            ...(groupPath
-                ? ownersToTarget(root, (node) => node.group_path === groupPath, []) ?? []
-                : []),
-        ].filter((owner) => owner !== "root");
-        if (required.length === 0) return;
-        setExpanded((previous) => {
-            if (required.every((owner) => previous.has(owner))) return previous;
-            return new Set([...previous, ...required]);
-        });
+    // Expansion is selection-driven, never a separate control: the regions
+    // open are exactly those of the job being viewed (and an open drawer's
+    // group) plus their enclosing regions. Clicking a job expands it because
+    // clicking navigates to it; clicking anything else collapses it because
+    // it is no longer the selection.
+    const expanded = useMemo(() => {
+        const paths = new Set<string>();
+        if (!root) return paths;
+        const targets: ((node: StructureNode) => boolean)[] = [
+            (node) => node.job_id === jobId || !!node.contains_current,
+        ];
+        if (groupPath) targets.push((node) => node.group_path === groupPath);
+        for (const isTarget of targets) {
+            const found = pathToTarget(root, isTarget, []);
+            if (!found) continue;
+            found.owners.forEach((owner) => paths.add(owner));
+            if (found.node.group_path != null) paths.add(found.node.group_path);
+        }
+        paths.delete("root");
+        return paths;
     }, [root, jobId, groupPath]);
-
-    const toggleExpand = (node: StructureNode) => {
-        setExpanded((previous) => {
-            const next = new Set(previous);
-            if (next.has(node.group_path)) next.delete(node.group_path);
-            else next.add(node.group_path);
-            return next;
-        });
-    };
 
     const openGroup = (node: StructureNode) => {
         const sp = new URLSearchParams(searchParams);
@@ -885,7 +871,6 @@ export const JobStructure = ({ jobId }: { jobId: string }) => {
                 currentJobId={jobId}
                 onOpenGroup={openGroup}
                 expanded={expanded}
-                onToggleExpand={toggleExpand}
             />
             {groupNode && (
                 <GroupDrawer

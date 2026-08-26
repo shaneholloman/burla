@@ -72,9 +72,11 @@ interface LaidOutNode {
     parent: LaidOutNode | null;
 }
 
-// Tidy tree layout: leaves stack top-to-bottom, parents center on their
-// children. Deterministic, so polling re-renders never shift the layout
-// unless the structure itself changed.
+// Leaves stack top-to-bottom; a parent aligns with its first child (the
+// pipeline continuation, which the API puts first), so a chain of sequential
+// stages renders as one straight row with nested branches hanging below it.
+// Deterministic, so polling re-renders never shift the layout unless the
+// structure itself changed.
 const layOutTree = (root: StructureNode): LaidOutNode[] => {
     const nodes: LaidOutNode[] = [];
     let nextLeafSlot = 0;
@@ -86,7 +88,7 @@ const layOutTree = (root: StructureNode): LaidOutNode[] => {
             nextLeafSlot += 1;
         } else {
             const childYs = node.children.map((child) => place(child, depth + 1, laidOut).y);
-            laidOut.y = (Math.min(...childYs) + Math.max(...childYs)) / 2;
+            laidOut.y = childYs[0];
         }
         return laidOut;
     };
@@ -243,7 +245,6 @@ export const JobStructure = ({ jobId }: { jobId: string }) => {
 
     return (
         <div className="mb-4">
-            <h2 className="mb-2 text-sm font-semibold text-foreground">Workload</h2>
             <StructureGraph root={root} currentJobId={jobId} />
         </div>
     );

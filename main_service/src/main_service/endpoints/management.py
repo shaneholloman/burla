@@ -890,10 +890,11 @@ def _structure_nodes(jobs: list[dict], current_job_id: str) -> list[dict]:
             stage_end = max(stage_end, _job_end(job))
     stage_nodes = [_stage_to_nodes(stage, current_job_id) for stage in stages]
     # Each later stage consumed the previous stage's output, so it nests under
-    # the previous stage's last-finishing node.
+    # the previous stage's last-finishing node. Prepended so the pipeline
+    # trunk renders as a straight line with nested branches hanging off it.
     for prev_nodes, next_nodes in zip(stage_nodes, stage_nodes[1:]):
         anchor = max(prev_nodes, key=lambda node: node["_max_ended_at"])
-        anchor["children"].extend(next_nodes)
+        anchor["children"][:0] = next_nodes
     for nodes in stage_nodes:
         for node in nodes:
             del node["_max_ended_at"]

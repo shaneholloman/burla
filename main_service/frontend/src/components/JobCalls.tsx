@@ -69,6 +69,7 @@ type CallStatus =
 type TaskSummary = {
     index: number;
     started_at: number | null;
+    ended_at: number | null;
     duration_sec: number | null;
     attempts: number | null;
     peak_cpus: number | null;
@@ -92,7 +93,14 @@ type CallLogs = {
     truncated: boolean;
 };
 
-type SortKey = "index" | "started" | "duration" | "attempts" | "peak_cpus" | "peak_mem";
+type SortKey =
+    | "index"
+    | "started"
+    | "ended"
+    | "duration"
+    | "status"
+    | "peak_cpus"
+    | "peak_mem";
 
 const CALLS_PER_PAGE = 50;
 
@@ -118,6 +126,7 @@ const callStatusBadge = (status: CallStatus) =>
 const mapCall = (call: any): TaskSummary => ({
     index: call.input_index,
     started_at: call.started_at ? Date.parse(call.started_at) / 1000 : null,
+    ended_at: call.ended_at ? Date.parse(call.ended_at) / 1000 : null,
     duration_sec: call.duration_seconds,
     attempts: call.attempt_count,
     peak_cpus: call.peak_cpu_cores,
@@ -696,6 +705,7 @@ const JobCalls = ({
     const [sort, setSort] = useState<SortKey>("started");
     const [descending, setDescending] = useState(true);
     const [failedOnly, setFailedOnly] = useState(false);
+    const [runningOnly, setRunningOnly] = useState(false);
     const [logsOnly, setLogsOnly] = useState(false);
     const [page, setPage] = useState(0);
     const [searchValue, setSearchValue] = useState("");
@@ -709,8 +719,9 @@ const JobCalls = ({
         const sortMap: Record<SortKey, string> = {
             index: "input_index",
             started: "started_at",
+            ended: "ended_at",
             duration: "duration",
-            attempts: "attempts",
+            status: "status",
             peak_cpus: "peak_cpu",
             peak_mem: "peak_memory",
         };
@@ -721,6 +732,7 @@ const JobCalls = ({
             logs_only: String(logsOnly),
             limit: String(CALLS_PER_PAGE),
         });
+        if (runningOnly) params.set("status", "running");
         if (searchIndex != null) params.set("input_index", String(searchIndex));
         const cursor = pageCursors.current[page];
         if (cursor) params.set("cursor", cursor);
@@ -734,7 +746,7 @@ const JobCalls = ({
         } catch {
             setTaskPage(null);
         }
-    }, [jobId, sort, descending, failedOnly, logsOnly, page, searchIndex]);
+    }, [jobId, sort, descending, failedOnly, runningOnly, logsOnly, page, searchIndex]);
 
     useEffect(() => {
         setTaskPage(null);
@@ -745,7 +757,7 @@ const JobCalls = ({
 
     useEffect(() => {
         pageCursors.current = { 0: null };
-    }, [sort, descending, failedOnly, logsOnly, searchIndex]);
+    }, [sort, descending, failedOnly, runningOnly, logsOnly, searchIndex]);
 
     useEffect(() => {
         void loadTaskPage();
@@ -810,10 +822,22 @@ const JobCalls = ({
                             checked={failedOnly}
                             onCheckedChange={(checked) => {
                                 setFailedOnly(checked);
+                                if (checked) setRunningOnly(false);
                                 setPage(0);
                             }}
                         />
                         <span className="whitespace-nowrap">Failed only</span>
+                    </label>
+                    <label className="flex cursor-pointer items-center gap-2 text-[13px] text-muted-foreground">
+                        <Switch
+                            checked={runningOnly}
+                            onCheckedChange={(checked) => {
+                                setRunningOnly(checked);
+                                if (checked) setFailedOnly(false);
+                                setPage(0);
+                            }}
+                        />
+                        <span className="whitespace-nowrap">Running only</span>
                     </label>
                 </div>
             </div>
@@ -827,7 +851,9 @@ const JobCalls = ({
             ) : taskPage.tasks.length === 0 ? (
                 <div className="border-t border-border/70 px-5 py-6">
                     <p className="text-sm font-medium text-foreground">
-                        {failedOnly
+                        {runningOnly
+                            ? "No running calls"
+                            : failedOnly
                             ? "No failed calls"
                             : logsOnly
                             ? "No calls with logs"
@@ -835,7 +861,7 @@ const JobCalls = ({
                             ? `No call with input index ${searchIndex.toLocaleString()}`
                             : "No call data"}
                     </p>
-                    {!failedOnly && !logsOnly && searchIndex == null && (
+                    {!runningOnly && !failedOnly && !logsOnly && searchIndex == null && (
                         <p className="mt-1 text-[13px] text-muted-foreground">
                             {isLive
                                 ? "Calls appear here once their first samples or logs arrive."
@@ -846,7 +872,7 @@ const JobCalls = ({
             ) : (
                 <>
                     <div className="w-full min-w-0 overflow-x-auto border-t border-border/70">
-                        <Table className="w-full min-w-[760px]">
+                        <Table className="w-full min-w-[760px] table-fixed">
                             <TableHeader>
                                 <TableRow className="hover:bg-transparent">
                                     <SortableHead
@@ -867,8 +893,8 @@ const JobCalls = ({
                                         className="text-right"
                                     />
                                     <SortableHead
-                                        label="Duration"
-                                        column="duration"
+                                        label="Ended At"
+                                        column="ended"
                                         sort={sort}
                                         descending={descending}
                                         onSort={onSort}
@@ -876,8 +902,8 @@ const JobCalls = ({
                                         className="text-right"
                                     />
                                     <SortableHead
-                                        label="Attempts"
-                                        column="attempts"
+                                        label="Duration"
+                                        column="duration"
                                         sort={sort}
                                         descending={descending}
                                         onSort={onSort}
@@ -902,7 +928,15 @@ const JobCalls = ({
                                         align="right"
                                         className="text-right"
                                     />
-                                    <TableHead className="w-28 pr-5" />
+                                    <SortableHead
+                                        label="Status"
+                                        column="status"
+                                        sort={sort}
+                                        descending={descending}
+                                        onSort={onSort}
+                                        align="right"
+                                        className="pr-5 text-right"
+                                    />
                                 </TableRow>
                             </TableHeader>
                             <TableBody>
@@ -926,6 +960,9 @@ const JobCalls = ({
                                                 ? formatLogTime(row.started_at)
                                                 : ""}
                                         </TableCell>
+                                        <TableCell className="text-right text-[13px] tabular-nums text-muted-foreground">
+                                            {row.ended_at != null ? formatLogTime(row.ended_at) : ""}
+                                        </TableCell>
                                         <TableCell className="text-right text-[13px] tabular-nums text-foreground">
                                             {row.duration_sec != null ? (
                                                 formatDuration(row.duration_sec)
@@ -934,9 +971,6 @@ const JobCalls = ({
                                                     No samples
                                                 </span>
                                             )}
-                                        </TableCell>
-                                        <TableCell className="text-right text-[13px] tabular-nums text-muted-foreground">
-                                            {row.attempts != null ? row.attempts : ""}
                                         </TableCell>
                                         <TableCell className="text-right text-[13px] tabular-nums text-muted-foreground">
                                             {row.peak_cpus != null
@@ -948,7 +982,7 @@ const JobCalls = ({
                                                 ? formatBytes(row.peak_mem_bytes)
                                                 : ""}
                                         </TableCell>
-                                        <TableCell className="w-28 pr-5 text-right">
+                                        <TableCell className="pr-5 text-right">
                                             {callStatusBadge(row.status)}
                                         </TableCell>
                                     </TableRow>

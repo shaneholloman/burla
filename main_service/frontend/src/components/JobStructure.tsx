@@ -314,7 +314,7 @@ const GraphNodeCard = ({
     );
     return (
         <div
-            className="absolute animate-in fade-in duration-300 transition-[left,top] ease-in-out"
+            className="absolute animate-in fade-in duration-300"
             style={{ left: x, top: y, width: NODE_W, height: NODE_H }}
             title={title}
         >
@@ -335,6 +335,63 @@ const GraphNodeCard = ({
 // line ends at the back of the head, like a shaft meeting an arrowhead.
 const EDGE_INSET = 7;
 const EDGE_FADE_WIDTH = 40;
+const LAYOUT_ANIMATION_MS = 300;
+const CANVAS_PAD = 24;
+
+const easeInOut = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
+
+const nodeKey = (placed: PlacedNode) => placed.node.group_path ?? "root";
+
+const layoutSignature = (layout: GraphLayout) =>
+    [
+        layout.nodes.map((p) => `${nodeKey(p)}:${Math.round(p.x)},${Math.round(p.y)}`).join("|"),
+        layout.regions
+            .map(
+                (r) =>
+                    `${r.key}:${Math.round(r.x)},${Math.round(r.y)},${Math.round(r.width)},${Math.round(r.height)}`
+            )
+            .join("|"),
+    ].join("#");
+
+// One tween drives cards, regions, edges, and the canvas together, so arrows
+// stay pinned to the cards they connect throughout the animation (CSS can
+// transition positions but not SVG path geometry).
+const interpolateLayout = (from: GraphLayout, to: GraphLayout, t: number): GraphLayout => {
+    if (t >= 1) return to;
+    const lerp = (a: number, b: number) => a + (b - a) * t;
+    const fromNodes = new Map(from.nodes.map((p) => [nodeKey(p), p]));
+    const nodes = to.nodes.map((placed) => {
+        const previous = fromNodes.get(nodeKey(placed));
+        return previous
+            ? { ...placed, x: lerp(previous.x, placed.x), y: lerp(previous.y, placed.y) }
+            : placed;
+    });
+    const byKey = new Map(nodes.map((placed) => [nodeKey(placed), placed]));
+    const edges = to.edges.map((edge) => ({
+        from: byKey.get(nodeKey(edge.from)) ?? edge.from,
+        to: byKey.get(nodeKey(edge.to)) ?? edge.to,
+    }));
+    const fromRegions = new Map(from.regions.map((region) => [region.key, region]));
+    const regions = to.regions.map((region) => {
+        const previous = fromRegions.get(region.key);
+        return previous
+            ? {
+                  ...region,
+                  x: lerp(previous.x, region.x),
+                  y: lerp(previous.y, region.y),
+                  width: lerp(previous.width, region.width),
+                  height: lerp(previous.height, region.height),
+              }
+            : region;
+    });
+    return {
+        nodes,
+        regions,
+        edges,
+        width: lerp(from.width, to.width),
+        height: lerp(from.height, to.height),
+    };
+};
 
 const StructureGraph = ({
     root,
@@ -348,7 +405,7 @@ const StructureGraph = ({
     expanded: Set<string>;
 }) => {
     const navigate = useNavigate();
-    const layout = useMemo(
+    const target = useMemo(
         () =>
             layOutWorkload(
                 root,
@@ -356,6 +413,33 @@ const StructureGraph = ({
             ),
         [root, expanded]
     );
+
+    // What actually renders: the target layout, or a frame on the way there.
+    const [layout, setLayout] = useState<GraphLayout>(target);
+    const layoutRef = useRef(target);
+    useEffect(() => {
+        layoutRef.current = layout;
+    }, [layout]);
+    const frameRef = useRef<number>();
+    useEffect(() => {
+        const from = layoutRef.current;
+        if (layoutSignature(from) === layoutSignature(target)) {
+            // Same geometry (e.g. a data-only poll refresh): adopt without
+            // animating.
+            setLayout(target);
+            return;
+        }
+        const startedAt = performance.now();
+        const step = (now: number) => {
+            const t = Math.min(1, (now - startedAt) / LAYOUT_ANIMATION_MS);
+            setLayout(interpolateLayout(from, target, easeInOut(t)));
+            if (t < 1) frameRef.current = requestAnimationFrame(step);
+        };
+        frameRef.current = requestAnimationFrame(step);
+        return () => {
+            if (frameRef.current) cancelAnimationFrame(frameRef.current);
+        };
+    }, [target]);
 
     const scrollRef = useRef<HTMLDivElement>(null);
     const hasCenteredRef = useRef(false);
@@ -368,6 +452,37 @@ const StructureGraph = ({
             right: el.scrollLeft + el.clientWidth < el.scrollWidth - 1,
         });
     };
+
+    // Selecting a job must never move it out of sight: when the viewed job
+    // changes, scroll (if needed) to where its card will END UP once the
+    // collapse/expand tween settles. The layout can legitimately change twice
+    // after a click (once from the stale tree, once from the fresh one), so
+    // keep correcting for a short window rather than exactly once.
+    const prevJobRef = useRef(currentJobId);
+    const scrollOwedUntilRef = useRef(0);
+    useEffect(() => {
+        if (prevJobRef.current !== currentJobId) {
+            prevJobRef.current = currentJobId;
+            scrollOwedUntilRef.current = Date.now() + 1500;
+        }
+        if (Date.now() > scrollOwedUntilRef.current) return;
+        const el = scrollRef.current;
+        if (!el) return;
+        // Exact id first: contains_current can be stale for one render after
+        // navigating (it comes from the previous page's tree fetch).
+        const current =
+            target.nodes.find((n) => n.node.job_id === currentJobId) ??
+            target.nodes.find((n) => n.node.contains_current);
+        if (!current) return;
+        const nodeLeft = current.x + CANVAS_PAD;
+        const nodeRight = nodeLeft + NODE_W;
+        const safeLeft = el.scrollLeft + EDGE_FADE_WIDTH;
+        const safeRight = el.scrollLeft + el.clientWidth - EDGE_FADE_WIDTH;
+        let scrollTo: number | null = null;
+        if (nodeLeft < safeLeft) scrollTo = nodeLeft - EDGE_FADE_WIDTH;
+        else if (nodeRight > safeRight) scrollTo = nodeRight + EDGE_FADE_WIDTH - el.clientWidth;
+        if (scrollTo != null) el.scrollTo({ left: Math.max(0, scrollTo), behavior: "smooth" });
+    }, [target, currentJobId]);
 
     const revealNode = (element: HTMLElement, rightOverflow = 0) => {
         const el = scrollRef.current!;
@@ -388,9 +503,9 @@ const StructureGraph = ({
     useEffect(() => {
         const el = scrollRef.current;
         if (el && !hasCenteredRef.current) {
-            const current = layout.nodes.find(
-                (n) => n.node.job_id === currentJobId || n.node.contains_current
-            );
+            const current =
+                target.nodes.find((n) => n.node.job_id === currentJobId) ??
+                target.nodes.find((n) => n.node.contains_current);
             // The current node may not be laid out yet on the very first
             // render (its ancestors auto-expand one render later), so keep
             // waiting until it exists.
@@ -401,7 +516,7 @@ const StructureGraph = ({
         }
         updateFades();
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [layout, currentJobId]);
+    }, [target, layout, currentJobId]);
 
     return (
         <div className="relative rounded-xl border border-border bg-card shadow-sm">
@@ -428,10 +543,7 @@ const StructureGraph = ({
                         backgroundSize: "22px 22px",
                     }}
                 >
-                    <div
-                        className="relative transition-[width,height] duration-300 ease-in-out"
-                        style={{ width: layout.width, height: layout.height }}
-                    >
+                    <div className="relative" style={{ width: layout.width, height: layout.height }}>
                     {/* Containment regions: everything inside a region runs
                         inside the job card sitting on its top edge. Painted
                         first so edges and cards render above; deeper regions
@@ -444,7 +556,7 @@ const StructureGraph = ({
                         <div
                             key={region.key}
                             className={cn(
-                                "pointer-events-none absolute rounded-xl transition-all duration-300 ease-in-out animate-in fade-in",
+                                "pointer-events-none absolute rounded-xl animate-in fade-in duration-300",
                                 region.depth % 2 === 0
                                     ? "bg-[hsl(var(--graph-well-1))]"
                                     : "bg-[hsl(var(--graph-well-2))]"
@@ -490,11 +602,7 @@ const StructureGraph = ({
                                     : `M ${start.x} ${start.y} C ${midX} ${start.y}, ${midX} ${end.y}, ${end.x} ${end.y}`;
                             return (
                                 <path
-                                    // Coordinates in the key: a moved edge
-                                    // remounts and fades in at its new spot
-                                    // instead of visibly teleporting while the
-                                    // cards it connects glide.
-                                    key={`${to.node.group_path}@${start.x},${start.y},${end.x},${end.y}`}
+                                    key={to.node.group_path}
                                     d={path}
                                     fill="none"
                                     className="animate-in fade-in duration-300 stroke-muted-foreground/70"
@@ -836,15 +944,18 @@ export const JobStructure = ({ jobId }: { jobId: string }) => {
     const expanded = useMemo(() => {
         const paths = new Set<string>();
         if (!root) return paths;
-        const targets: ((node: StructureNode) => boolean)[] = [
-            (node) => node.job_id === jobId || !!node.contains_current,
+        // Exact id first: contains_current comes from the tree fetch and is
+        // stale for a moment after navigating, which would briefly keep the
+        // previous job's region expanded.
+        const found = [
+            pathToTarget(root, (node) => node.job_id === jobId, []) ??
+                pathToTarget(root, (node) => !!node.contains_current, []),
+            groupPath ? pathToTarget(root, (node) => node.group_path === groupPath, []) : null,
         ];
-        if (groupPath) targets.push((node) => node.group_path === groupPath);
-        for (const isTarget of targets) {
-            const found = pathToTarget(root, isTarget, []);
-            if (!found) continue;
-            found.owners.forEach((owner) => paths.add(owner));
-            if (found.node.group_path != null) paths.add(found.node.group_path);
+        for (const target of found) {
+            if (!target) continue;
+            target.owners.forEach((owner) => paths.add(owner));
+            if (target.node.group_path != null) paths.add(target.node.group_path);
         }
         paths.delete("root");
         return paths;

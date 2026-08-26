@@ -225,11 +225,12 @@ const GraphNodeCard = ({
             style={{ left: x, top: y, width: NODE_W, height: NODE_H }}
             title={title}
         >
-            {/* Stacked-card lip: a group of jobs looks like a pile, not one job. */}
+            {/* Stacked-card effect: a same-size card offset down-right, so a
+                group of jobs reads as a pile, not one job. */}
             {isGroup && (
                 <span
                     aria-hidden
-                    className="absolute inset-x-2 -bottom-[5px] h-4 rounded-lg border border-border bg-card"
+                    className="absolute inset-0 translate-x-[5px] translate-y-[5px] rounded-lg border border-border bg-card shadow-sm"
                 />
             )}
             {inner}
@@ -237,7 +238,9 @@ const GraphNodeCard = ({
     );
 };
 
-const EDGE_INSET = 5;
+// Room for the 6px arrowhead between the line's end and the node's edge: the
+// line ends at the back of the head, like a shaft meeting an arrowhead.
+const EDGE_INSET = 7;
 
 const StructureGraph = ({
     root,
@@ -284,25 +287,27 @@ const StructureGraph = ({
     const legendY = 5;
     return (
         <div className="relative rounded-xl border border-border bg-card shadow-sm">
-            <div ref={scrollRef} onScroll={updateFades} className="overflow-x-auto p-6">
+            <div ref={scrollRef} onScroll={updateFades} className="overflow-x-auto rounded-t-xl">
                 <div
-                    className="relative"
+                    className="min-w-full w-max p-6"
                     style={{
-                        width,
-                        height,
                         backgroundImage: "radial-gradient(hsl(var(--border)) 1px, transparent 1px)",
                         backgroundSize: "22px 22px",
                     }}
                 >
-                    <svg width={width} height={height} className="absolute inset-0">
+                    <div className="relative" style={{ width, height }}>
+                    <svg width={width} height={height} className="absolute inset-0 overflow-visible">
                         <defs>
+                            {/* refX=0 anchors the BACK of the head at the line's
+                                end, so the shaft meets the arrowhead. */}
                             <marker
                                 id="arrow-chained"
                                 markerWidth="6"
                                 markerHeight="6"
-                                refX="5"
+                                refX="0"
                                 refY="3"
                                 orient="auto"
+                                markerUnits="userSpaceOnUse"
                             >
                                 <path
                                     d="M0,0 L6,3 L0,6 Z"
@@ -313,9 +318,10 @@ const StructureGraph = ({
                                 id="arrow-nested"
                                 markerWidth="6"
                                 markerHeight="6"
-                                refX="5"
+                                refX="0"
                                 refY="3"
                                 orient="auto"
+                                markerUnits="userSpaceOnUse"
                             >
                                 <path
                                     d="M0,0 L6,3 L0,6 Z"
@@ -326,14 +332,21 @@ const StructureGraph = ({
                         {laidOutNodes
                             .filter((n) => n.parent)
                             .map((n) => {
-                                const from = { x: n.parent!.x + NODE_W, y: n.parent!.y + NODE_H / 2 };
+                                const sameRow = n.row === n.parent!.row;
+                                // Flow runs left to right out of the node's side;
+                                // containment drops out of the node's bottom.
+                                const from = sameRow
+                                    ? { x: n.parent!.x + NODE_W, y: n.parent!.y + NODE_H / 2 }
+                                    : { x: n.parent!.x + NODE_W / 2, y: n.parent!.y + NODE_H };
                                 const to = { x: n.x - EDGE_INSET, y: n.y + NODE_H / 2 };
-                                const midX = (from.x + to.x) / 2;
+                                const path = sameRow
+                                    ? `M ${from.x} ${from.y} L ${to.x} ${to.y}`
+                                    : `M ${from.x} ${from.y} C ${from.x} ${to.y}, ${from.x} ${to.y}, ${to.x} ${to.y}`;
                                 const chained = n.node.chained;
                                 return (
                                     <path
                                         key={`${n.depth}-${n.node.function_name}-${n.y}`}
-                                        d={`M ${from.x} ${from.y} C ${midX} ${from.y}, ${midX} ${to.y}, ${to.x} ${to.y}`}
+                                        d={path}
                                         fill="none"
                                         className={
                                             chained
@@ -355,6 +368,7 @@ const StructureGraph = ({
                             onOpenGroup={onOpenGroup}
                         />
                     ))}
+                    </div>
                 </div>
             </div>
 

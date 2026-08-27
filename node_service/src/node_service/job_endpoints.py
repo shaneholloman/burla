@@ -114,42 +114,46 @@ async def get_inputs(
     requester_queue_size: int = Query(0),
     requester_idle_workers: int = Query(0),
 ):
-    if job_id != SELF["current_job"]:
-        return Response("job not found", status_code=404)
+    async with SELF["input_transfer_lock"]:
+        if (
+            job_id != SELF["current_job"]
+            or SELF["job_watcher_stop_event"].is_set()
+        ):
+            return Response("job not found", status_code=404)
 
-    if transfer_id in SELF["pending_transfers"]:
-        items = SELF["pending_transfers"][transfer_id]
-    else:
-        difference = SELF["inputs_queue"].qsize() - requester_queue_size
-        target_num = max(difference, 1) // 2
-        items = []
-        total_bytes = 0
-        while len(items) < target_num:
-            try:
-                input_index, input_pkl = SELF["inputs_queue"].get_last_nowait()
-            except asyncio.QueueEmpty:
-                break
-            if total_bytes + len(input_pkl) > 3_000_000 and items:
-                SELF["inputs_queue"].put_nowait(
-                    (input_index, input_pkl), len(input_pkl)
-                )
-                break
-            items.append((input_index, input_pkl))
-            total_bytes += len(input_pkl)
-        items.reverse()
-        # Queued inputs always take priority, but once the queue is dry a
-        # peer with genuinely idle workers may take the in-flight inputs of
-        # parked (throttled) workers: they were throttled precisely so their
-        # attempts would stay cheap to move to free capacity elsewhere.
-        queue_is_empty = SELF["inputs_queue"].qsize() == 0
-        if not items and queue_is_empty and requester_idle_workers > 0:
-            items = await revoke_throttled_inputs(requester_idle_workers)
-        SELF["pending_transfers"][transfer_id] = items
+        if transfer_id in SELF["pending_transfers"]:
+            items = SELF["pending_transfers"][transfer_id]
+        else:
+            difference = SELF["inputs_queue"].qsize() - requester_queue_size
+            target_num = max(difference, 1) // 2
+            items = []
+            total_bytes = 0
+            while len(items) < target_num:
+                try:
+                    input_index, input_pkl = SELF["inputs_queue"].get_last_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if total_bytes + len(input_pkl) > 3_000_000 and items:
+                    SELF["inputs_queue"].put_nowait(
+                        (input_index, input_pkl), len(input_pkl)
+                    )
+                    break
+                items.append((input_index, input_pkl))
+                total_bytes += len(input_pkl)
+            items.reverse()
+            # Queued inputs always take priority, but once the queue is dry a
+            # peer with genuinely idle workers may take the in-flight inputs of
+            # parked (throttled) workers: they were throttled precisely so their
+            # attempts would stay cheap to move to free capacity elsewhere.
+            queue_is_empty = SELF["inputs_queue"].qsize() == 0
+            if not items and queue_is_empty and requester_idle_workers > 0:
+                items = await revoke_throttled_inputs(requester_idle_workers)
+            SELF["pending_transfers"][transfer_id] = items
 
-    return Response(
-        content=pickle.dumps(items),
-        media_type="application/octet-stream",
-    )
+        return Response(
+            content=pickle.dumps(items),
+            media_type="application/octet-stream",
+        )
 
 
 @router.post("/jobs/{job_id}/ack_transfer")
@@ -158,17 +162,20 @@ async def ack_transfer(
     transfer_id: str = Query(...),
     received: bool = Query(...),
 ):
-    if job_id != SELF["current_job"]:
-        return Response("job not found", status_code=404)
+    async with SELF["input_transfer_lock"]:
+        if job_id != SELF["current_job"]:
+            return Response("job not found", status_code=404)
 
-    items = SELF["pending_transfers"].pop(transfer_id, None)
-    if items is None:
+        items = SELF["pending_transfers"].pop(transfer_id, None)
+        if items is None:
+            return Response(status_code=200)
+
+        if not received:
+            for input_index, input_pkl in items:
+                SELF["inputs_queue"].put_nowait(
+                    (input_index, input_pkl), len(input_pkl)
+                )
         return Response(status_code=200)
-
-    if not received:
-        for input_index, input_pkl in items:
-            SELF["inputs_queue"].put_nowait((input_index, input_pkl), len(input_pkl))
-    return Response(status_code=200)
 
 
 @router.post("/jobs/{job_id}/trade_slots")

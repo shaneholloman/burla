@@ -109,9 +109,13 @@ def test_input_steal_between_nodes(
             verify=verify,
         )
 
-        # Give both nodes a moment to upload inputs before selecting whichever
-        # still has a queued batch to donate.
-        time.sleep(5)
+        wait_for_fixture(
+            lambda: main_http_client.get(f"/v1/jobs/{job_id}")
+            .json()
+            .get("all_inputs_uploaded"),
+            timeout=180,
+            message="job inputs were not uploaded before the transfer check",
+        )
 
         # 1. Steal a batch from whichever node still has queued work.
         items = []

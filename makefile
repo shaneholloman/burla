@@ -253,7 +253,7 @@ dev-up:
 	for i in $$(seq 1 120); do \
 		if nc -z localhost $(BURLA_HEAD_PORT) 2>/dev/null; then \
 			echo "Head [$(BURLA_CLUSTER_NAME)] is up at $(BURLA_DASHBOARD_URL)"; \
-			echo "No nodes yet: they boot when the cluster is turned on (dashboard power button or the test fixtures)."; \
+			echo "Boot nodes: BURLA_CLUSTER_DASHBOARD_URL=$(BURLA_DASHBOARD_URL) BURLA_ENVIRONMENT=test uv run --project ./client burla cluster start"; \
 			exit 0; \
 		fi; \
 		if ! kill -0 $$(cat _local_dev_state/head.pid) 2>/dev/null; then \

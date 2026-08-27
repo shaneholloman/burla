@@ -119,6 +119,9 @@ class GCPProvider:
             # `delete_stopped_instances` reads (guest attributes are the only
             # thing it can write without a service account).
             Items(key="enable-guest-attributes", value="TRUE"),
+            # Streams kernel console output (OOM kills, hung-task warnings,
+            # reclaim stalls) to Cloud Logging so it survives VM deletion.
+            Items(key="serial-port-logging-enable", value="TRUE"),
         ]
 
         zones = list(self.zones_supporting_machine_type(region, machine_type))

@@ -7,6 +7,7 @@ from queue import Queue
 from threading import Event
 from pickle import UnpicklingError
 from time import time
+from traceback import format_exception
 import aiohttp
 import cloudpickle
 from aiohttp import ClientConnectorError, ClientError, ClientOSError, ClientTimeout
@@ -667,6 +668,7 @@ class Node:
         return_queue: Queue,
         nodes: list["Node"],
         first_chunk_barrier: asyncio.Barrier | None,
+        raise_errors: bool,
     ):
         was_initially_ready = self.state == "READY"
         # wait until ready
@@ -768,7 +770,6 @@ class Node:
                     traceback = Traceback.from_dict(
                         error_info["traceback_dict"]
                     ).as_traceback()
-                    self.udf_error_event.set()
                     exc = error_info["exception"].with_traceback(traceback)
                     # Callers can inspect the bad item without changing the
                     # traceback Python displays.
@@ -776,6 +777,17 @@ class Node:
                         exc.burla_input_index = input_index
                     except Exception:
                         pass
+                    if not raise_errors:
+                        traceback_str = "".join(
+                            format_exception(type(exc), exc, traceback)
+                        )
+                        self.spinner_compatible_print(
+                            f"Input at index {input_index} raised an exception "
+                            f"(returned in results):\n{traceback_str}"
+                        )
+                        return_values.append(exc)
+                        continue
+                    self.udf_error_event.set()
                     raise exc
                 else:
                     return_values.append(cloudpickle.loads(result_pkl))

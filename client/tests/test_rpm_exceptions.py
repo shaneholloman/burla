@@ -37,6 +37,28 @@ def test_udf_error_preserves_traceback(rpm_subprocess, local_dev_cluster):
     assert "The above exception was the direct cause" in result["traceback"]
 
 
+def test_udf_errors_returned_when_raise_errors_false(rpm_subprocess, local_dev_cluster):
+    source = (
+        "def test_function(x):\n"
+        "    if x % 3 == 0:\n"
+        "        raise ValueError(f'boom on {x}')\n"
+        "    return x * 10\n"
+    )
+    result = rpm_subprocess(
+        source, list(range(10)), timeout_seconds=60, raise_errors=False
+    )
+    assert result["ok"], result.get("traceback")
+    outputs = result["outputs"]
+    assert len(outputs) == 10
+    errors = [o for o in outputs if isinstance(o, Exception)]
+    assert all(isinstance(e, ValueError) for e in errors)
+    assert sorted(e.burla_input_index for e in errors) == [0, 3, 6, 9]
+    successes = sorted(o for o in outputs if not isinstance(o, Exception))
+    assert successes == [10, 20, 40, 50, 70, 80]
+    # Tracebacks are still printed even though nothing is raised.
+    assert "ValueError: boom on 3" in result["stdout"]
+
+
 def test_burla_exception_re_raised_on_client(rpm_subprocess, local_dev_cluster):
     source = (
         "from burla._node import AllNodesBusy\n"

@@ -139,6 +139,7 @@ class RemoteParallelMapReporter:
         self.function_ram = kwargs["func_ram"]
         self.background = kwargs["background"]
         self.generator = kwargs["generator"]
+        self.raise_errors = kwargs["raise_errors"]
         self.grow = kwargs["grow"]
         self.max_parallelism = kwargs["max_parallelism"]
         self.job_id = kwargs["job_id"]
@@ -178,6 +179,7 @@ class RemoteParallelMapReporter:
         message += (
             f"background={self.background}, generator={self.generator}, "
             f"spinner={self.spinner_enabled}, grow={self.grow}, "
+            f"raise_errors={self.raise_errors}, "
         )
         message += f"max_parallelism={self.max_parallelism}, job_id={self.job_id}"
         await self._log_telemetry_async(message, self.session, project_id=self.project_id)

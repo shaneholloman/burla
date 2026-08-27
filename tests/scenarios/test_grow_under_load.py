@@ -2,20 +2,15 @@
 Scenario 3: cluster grows under load.
 
 Submits a job larger than the current cluster capacity with `grow=True`,
-verifies main_service boots additional nodes with the grow-specific
-`inactivity_shutdown_time_sec=60` and `reserved_for_job=<job_id>` set, and
-that the job completes successfully using the expanded capacity.
+verifies the job completes using expanded capacity, then verifies the added
+nodes are deleted while the pre-existing nodes remain ready.
 """
 
 from __future__ import annotations
 
-import time
-
 import pytest
 
-# local-dev caps grow at LOCAL_DEV_MAX_GROW_CPUS=4, so only real VMs exercise
-# a genuine capacity deficit and real boot latency.
-pytestmark = [pytest.mark.e2e, pytest.mark.slow, pytest.mark.remote_dev]
+pytestmark = [pytest.mark.e2e, pytest.mark.slow, pytest.mark.timeout(360)]
 
 
 def test_grow_under_load(
@@ -24,15 +19,16 @@ def test_grow_under_load(
     main_http_client,
     wait_for_fixture,
 ):
-    # Snapshot current cluster size so we can verify grow actually added nodes.
     before = main_http_client.get("/v1/cluster/state").json()
-    n_ready_before = len(before["ready_nodes"])
-    n_booting_before = before["booting_count"]
+    ready_before = {node["instance_name"] for node in before["ready_nodes"]}
+    deleted_before = {
+        node["id"]
+        for node in main_http_client.get(
+            "/v1/cluster/deleted_recent_paginated",
+            params={"offset": 0, "limit": 10000},
+        ).json()["nodes"]
+    }
 
-    # 200 inputs with a UDF that takes ~1s each. Even with max capacity the
-    # job needs to run long enough for grow to kick in. max_parallelism is
-    # implicitly len(inputs)=200 so grow will provision up to the local-dev
-    # cap (LOCAL_DEV_MAX_GROW_CPUS=4 CPUs).
     source = (
         "import time\n"
         "def test_function(x):\n"
@@ -46,24 +42,29 @@ def test_grow_under_load(
     assert len(result["outputs"]) == 200
     assert set(result["outputs"]) == {x * 2 for x in range(200)}
 
-    # After the job finishes, `reserved_for_job` is cleared on every node:
-    # `on_job_start` clears it the moment the reserved job's assignment lands.
-    # Check for the stable signature instead: grow-booted nodes get
-    # `inactivity_shutdown_time_sec == 60` (GROW_INACTIVITY_SHUTDOWN_TIME_SEC).
-    # The live node list only shows nodes that still exist, but grow nodes
-    # idle for 60s before self-deleting so they're still visible right after
-    # the job completes.
-    recent_cutoff = time.time() - 600
-    grow_signature_nodes = []
-    for data in main_http_client.get("/v1/cluster/nodes").json()["nodes"]:
-        if data.get("started_booting_at", 0) < recent_cutoff:
-            continue
-        if data.get("inactivity_shutdown_time_sec") == 60:
-            grow_signature_nodes.append((data.get("instance_name"), data))
+    def deleted_grow_nodes():
+        deleted_after = {
+            node["id"]
+            for node in main_http_client.get(
+                "/v1/cluster/deleted_recent_paginated",
+                params={"offset": 0, "limit": 10000},
+            ).json()["nodes"]
+        }
+        return deleted_after - deleted_before
 
-    if not grow_signature_nodes and n_ready_before + n_booting_before <= 1:
-        pytest.fail(
-            f"grow=True with 200 inputs against {n_ready_before}-node cluster "
-            f"should have booted nodes with inactivity_shutdown_time_sec=60 "
-            f"(GROW_INACTIVITY_SHUTDOWN_TIME_SEC), but none were found"
-        )
+    deleted_grow_node_ids = wait_for_fixture(
+        deleted_grow_nodes,
+        timeout=60,
+        message="grow-created nodes were not deleted after the job",
+    )
+    assert deleted_grow_node_ids.isdisjoint(ready_before)
+
+    wait_for_fixture(
+        lambda: ready_before
+        <= {
+            node["instance_name"]
+            for node in main_http_client.get("/v1/cluster/state").json()["ready_nodes"]
+        },
+        timeout=30,
+        message="pre-existing nodes did not return to READY",
+    )

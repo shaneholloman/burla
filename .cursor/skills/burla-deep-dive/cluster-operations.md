@@ -21,7 +21,7 @@ The status string lives in two places that must agree:
 
 The head's `cluster_state` is authoritative for the rest of the cluster; `SELF` is authoritative for what the node will accept next.
 
-There is no cache layer and no listener: every endpoint that reads node state (`GET /v1/cluster/state`, `GET /v1/cluster/nodes/{id}`, the node-selection step inside `POST /v1/jobs/{id}/start`, the dashboard SSE streams) reads `cluster_state` directly (`list_nodes` / `get_node`), and the dicts stay fresh because every node PUTs its state to `/v1/nodes/{id}/state` roughly once per second. `update_node` enforces the merge rules: BOOTING/READY/RUNNING never overwrite a terminal DELETED/FAILED, DELETED never overwrites FAILED (failed nodes stay visible for debugging), and DELETED entries are persisted to history then dropped from memory. After a head restart, `cluster_state.load_from_history` reloads active nodes and RUNNING jobs, and the pushes correct any staleness within a second or two.
+There is no cache layer and no listener: every endpoint that reads node state (`GET /v1/cluster/state`, `GET /v1/cluster/nodes/{id}`, the node-selection step inside `POST /v1/jobs/{id}/start`, the dashboard SSE streams) reads `cluster_state` directly (`list_nodes` / `get_node`), and the dicts stay fresh because every node PUTs its state to `/v1/nodes/{id}/state` roughly once per second. `update_node` enforces the merge rules: BOOTING/READY/RUNNING never overwrite a terminal DELETED/FAILED, DELETED never overwrites FAILED (failed nodes stay visible for debugging), and DELETED entries remain as tombstones so late pushes cannot resurrect them. After a head restart, `cluster_state.load_from_history` reloads active nodes and RUNNING jobs, and the pushes correct any staleness within a second or two.
 
 ## Main-service cluster endpoints
 
@@ -45,14 +45,15 @@ There is **no** `/v1/cluster/grow` endpoint anymore. Growth happens inline when 
 4. For packable CPU families in prod (`n4-standard-*` on GCP, `m7i.*` on AWS), `pack_cpu_machines` greedily fills with the family's largest size and covers the remainder with the smallest size that fits (GCP sizes: 80, 64, 32, 16, 8, 4, 2; `n4-standard-48` is intentionally excluded). For GPU clusters and local-dev it uses the configured machine type homogeneously. Machine types that can't fit even one call at the requested `func_cpu`/`func_ram` are filtered out.
 5. Pre-generates instance names (`burla-node-{uuid8}`) and schedules `_start_nodes(..., reserved_for_job=job_id)` in the background. Returns a list of `{instance_name, target_parallelism}` dicts as `booting_nodes` in the response so the client can start waiting for those specific nodes immediately.
 
-Nodes booted this way always get `inactivity_shutdown_time_sec = GROW_INACTIVITY_SHUTDOWN_TIME_SEC` (60s) regardless of the cluster-config value, so a burst-scaled job doesn't leave expensive hardware idle after it finishes.
+Nodes booted this way are marked with `job_scope_id={job_id}` and are never selectable by another job. On their next state push, the head deletes them when that job is terminal or once they have neither an assignment nor a reservation. They also keep the 60-second grow inactivity timeout as a fallback.
 
 ### `reserved_for_job`
 
-Nodes booted by the grow path start with `RESERVED_FOR_JOB={job_id}` in their env vars, and `Node.start` records `reserved_for_job` on the node's `cluster_state` entry at registration. `_select_ready_nodes_from_state` filters these out so no **other** job picks them up. The reservation is cleared in two places:
+Nodes booted by the grow path start with `RESERVED_FOR_JOB={job_id}` in their env vars, and `Node.start` records `reserved_for_job` on the node's `cluster_state` entry at registration. `_select_ready_nodes_from_state` filters these out so no **other** job picks them up. The reservation is cleared in three places:
 
 - `on_job_start` in `node_service/__init__.py` clears it the moment the reserved job's `POST /jobs/{id}` hits: it cancels the `_watch_reservation` task and its RUNNING push carries `reserved_for_job: None`.
-- `_watch_reservation` in `node_service/lifecycle_endpoints.py` polls the reserved job with `GET /v1/jobs/{id}` on the head every `RESERVATION_POLL_INTERVAL_SEC` (2s); if the job disappears or is no longer RUNNING, or 60s pass without assignment (`RESERVATION_ASSIGNMENT_TIMEOUT_SEC`), it clears `SELF["reserved_for_job"]` and pushes `reserved_for_job: None` so the node becomes available.
+- `_watch_reservation` in `node_service/lifecycle_endpoints.py` polls the reserved job with `GET /v1/jobs/{id}` on the head every `RESERVATION_POLL_INTERVAL_SEC` (2s); if the job disappears or is no longer RUNNING, or 60s pass without assignment (`RESERVATION_ASSIGNMENT_TIMEOUT_SEC`), it clears `SELF["reserved_for_job"]`. A job-scoped node is then deleted instead of becoming available.
+- `cluster_state.update_job` clears the head's reservation when the job becomes terminal, so nodes that finish booting after the job end are deleted on their next state push.
 
 ## `Node.start`: booting a single VM
 
@@ -107,7 +108,7 @@ In [node_service/src/node_service/__init__.py](../../../node_service/src/node_se
 ## `Node.delete`
 
 `Node.delete(self)` (no args):
-- Calls `cluster_state.update_node` with `{"status": "DELETED", "ended_at": time()}`. The merge rules keep a FAILED entry FAILED (so it remains visible for debugging); a genuinely DELETED entry is persisted to history and dropped from live memory.
+- Calls `cluster_state.update_node` with `{"status": "DELETED", "ended_at": time()}`. The merge rules keep a FAILED entry FAILED (so it remains visible for debugging); a genuinely DELETED entry is persisted to history and remains as an in-memory tombstone until restart.
 - Calls `provider.delete_instance(instance_name, zone)`. Already-deleted instances are swallowed silently.
 
 The dashboard's `/v1/cluster/deleted_recent_paginated` reads `DELETED` and `FAILED` rows from the history db for up to 7 days (sort key: `ended_at`, falling back to `started_booting_at`), overlaying any still-live FAILED entries so status flips show immediately.

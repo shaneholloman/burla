@@ -11,7 +11,7 @@ import requests
 from fastapi import APIRouter, Depends, HTTPException, Request
 from main_service.helpers import Logger, log_telemetry
 from main_service.node import Container, Node
-from main_service.providers import get_provider
+from main_service.providers import InstanceDeletedMidBoot, get_provider
 from main_service.transport_tls import CA_CERT_PATH
 
 from main_service import (
@@ -255,7 +255,10 @@ def _start_nodes(
     provider = get_provider()
 
     def _add_node_logged(**node_start_kwargs):
-        return Node.start(**node_start_kwargs).instance_name
+        try:
+            return Node.start(**node_start_kwargs).instance_name
+        except InstanceDeletedMidBoot:
+            return None
 
     for node_spec in config["Nodes"]:
         quantity = node_spec["quantity"] if n_nodes_to_add is None else n_nodes_to_add

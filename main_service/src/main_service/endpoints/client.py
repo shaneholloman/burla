@@ -107,7 +107,7 @@ def _select_ready_nodes_from_state(
     func_gpu: Optional[str],
     region: Optional[str],
 ):
-    """Walk the live node state, picking unreserved READY nodes that fit the
+    """Walk the live node state, picking reusable READY nodes that fit the
     requested per-function resources, up to `max_parallelism` total slots.
     When `image` is set, only nodes running that container are eligible.
     When `func_gpu` is set, only nodes on a matching GPU family are eligible.
@@ -127,6 +127,7 @@ def _select_ready_nodes_from_state(
         if n.get("status") == "READY"
         and not n.get("current_job")
         and not n.get("reserved_for_job")
+        and not n.get("job_scope_id")
         and cluster_state.node_is_fresh(n)
     ]
     ready_after_image = unfiltered_ready
@@ -493,9 +494,9 @@ async def start_job(
 async def get_cluster_state():
     """
     Returns the data `wait_for_nodes_to_be_ready` needs in one round-trip:
-    counts of BOOTING / RUNNING nodes plus the list of unreserved READY
-    node docs. `reserved_for_job` nodes are filtered here so the client
-    doesn't re-filter (matches `_select_ready_nodes_from_state`).
+    counts of BOOTING / RUNNING nodes plus the reusable READY node docs.
+    Reserved and job-scoped nodes are filtered here so the client doesn't
+    re-filter (matches `_select_ready_nodes_from_state`).
     """
     nodes_snapshot = cluster_state.list_nodes()
     booting_count = 0
@@ -511,6 +512,7 @@ async def get_cluster_state():
             status == "READY"
             and not data.get("current_job")
             and not data.get("reserved_for_job")
+            and not data.get("job_scope_id")
             and cluster_state.node_is_fresh(data)
         ):
             ready_nodes.append(data)

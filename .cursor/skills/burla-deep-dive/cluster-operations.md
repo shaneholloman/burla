@@ -45,7 +45,7 @@ There is **no** `/v1/cluster/grow` endpoint anymore. Growth happens inline when 
 4. For packable CPU families in prod (`n4-standard-*` on GCP, `m7i.*` on AWS), `pack_cpu_machines` greedily fills with the family's largest size and covers the remainder with the smallest size that fits (GCP sizes: 80, 64, 32, 16, 8, 4, 2; `n4-standard-48` is intentionally excluded). For GPU clusters and local-dev it uses the configured machine type homogeneously. Machine types that can't fit even one call at the requested `func_cpu`/`func_ram` are filtered out.
 5. Pre-generates instance names (`burla-node-{uuid8}`) and schedules `_start_nodes(..., reserved_for_job=job_id)` in the background. Returns a list of `{instance_name, target_parallelism}` dicts as `booting_nodes` in the response so the client can start waiting for those specific nodes immediately.
 
-Nodes booted this way are marked with `job_scope_id={job_id}` and are never selectable by another job. On their next state push, the head deletes them when that job is terminal or once they have neither an assignment nor a reservation. They also keep the 60-second grow inactivity timeout as a fallback.
+Nodes booted this way are marked with `job_scope_id={job_id}` and are never selectable by another job. On their next state push, the head deletes them when that job is terminal or once they have neither an assignment nor a reservation, persisting `terminal_reason.code=job_scope_finished` before deleting the VM. If deletion makes the relay return an error before the client receives the node's normal 404 completion response, the client reads that persisted record and treats only an exact job-scope match as DONE. They also keep the 60-second grow inactivity timeout as a fallback.
 
 ### `reserved_for_job`
 

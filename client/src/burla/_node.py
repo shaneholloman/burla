@@ -357,6 +357,25 @@ class Node:
             "logs": [],
         }
 
+    def _done_node_results(self):
+        self.state = "DONE"
+        self.current_parallelism = 0
+        return self._empty_node_results()
+
+    async def _was_deleted_after_finishing_scoped_job(self) -> bool:
+        try:
+            node = await self.client.get_node_including_deleted(self.instance_name)
+        except NETWORK_ERROR_TYPES:
+            return False
+        if node is None:
+            return False
+        reason = node.get("terminal_reason") or {}
+        return (
+            node.get("status") == "DELETED"
+            and node.get("job_scope_id") == self.job_id
+            and reason.get("code") == "job_scope_finished"
+        )
+
     def _print_logs(self, log_documents: list):
         if self.udf_error_event is not None and self.udf_error_event.is_set():
             return
@@ -568,17 +587,14 @@ class Node:
             async with response:
                 self.last_reply_timestamp = time()
                 if response.status == 404:
-                    self.state = "DONE"
-                    return {
-                        "result_batch_id": None,
-                        "results": [],
-                        "current_parallelism": 0,
-                        "dynamic_worker_reduction": None,
-                        "logs": [],
-                    }
+                    return self._done_node_results()
                 if response.status != 200:
+                    await self._raise_if_job_ended_by_lifecycle(self.job_id)
+                    if await self._was_deleted_after_finishing_scoped_job():
+                        return self._done_node_results()
                     raise Exception(
-                        f"Result-check failed for node: {self.instance_name}"
+                        f"Result-check failed for node {self.instance_name}: "
+                        f"HTTP {response.status}"
                     )
                 try:
                     node_results = pickle.loads(await response.content.read())
@@ -599,6 +615,8 @@ class Node:
             # it can answer this poll, so the head is the only place left
             # that knows why the node went silent.
             await self._raise_if_job_ended_by_lifecycle(self.job_id)
+            if await self._was_deleted_after_finishing_scoped_job():
+                return self._done_node_results()
             if self._result_poll_silence_timeout_exceeded():
                 msg = self._node_silence_timeout_message("returning results")
                 await self._fail_and_delete(msg)

@@ -11,7 +11,9 @@ The client and the dashboard browser never see either store directly; everything
 
 ## Node dict shape (cluster_state.NODES values)
 
-Same field names the old Firestore docs used: `instance_name`, `status` (BOOTING/READY/RUNNING/FAILED/DELETED), `host`, `zone`, `machine_type`, `gcp_region` (holds an AWS region on AWS), `containers`, `current_job`, `reserved_for_job`, `job_scope_id` (set only for grow-created nodes), `started_booting_at`, `inactivity_shutdown_time_sec`, `disk_size`, `num_gpus`, `spot`, `port`, `sync_gcs_bucket_name`, `ended_at`. DELETED entries remain as in-memory tombstones until the head restarts so late node pushes cannot resurrect them.
+Same field names the old Firestore docs used: `instance_name`, `status` (BOOTING/READY/RUNNING/FAILED/DELETED), `host`, `zone`, `machine_type`, `gcp_region` (holds an AWS region on AWS), `containers`, `current_job`, `reserved_for_job`, `job_scope_id` (set only for grow-created nodes), `terminal_reason`, `started_booting_at`, `inactivity_shutdown_time_sec`, `disk_size`, `num_gpus`, `spot`, `port`, `sync_gcs_bucket_name`, `ended_at`. DELETED entries remain as in-memory tombstones until the head restarts so late node pushes cannot resurrect them.
+
+`GET /v1/cluster/nodes/{id}` hides DELETED nodes by default because the client uses absence while polling BOOTING nodes. Passing `include_deleted=true` reads the persisted record instead; result polling uses this to verify that an unreachable grow node was intentionally deleted after finishing its assigned job.
 
 Status-merge rules in `cluster_state.update_node`:
 - BOOTING/READY/RUNNING never overwrite terminal DELETED/FAILED.

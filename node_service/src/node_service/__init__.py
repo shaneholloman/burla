@@ -77,9 +77,13 @@ def REINIT_SELF(SELF):
     SELF["current_parallelism"] = 0
     # This node's slot count for the current job: how many parallel calls it
     # owes the job. Set at assignment; shrinks when slots transfer to a
-    # replacement node. Sum over all nodes never exceeds the job's approved
-    # parallelism (slot conservation).
+    # replacement node, grows via neighbor trades and (on jobs without an
+    # explicit max_parallelism) locally minted slots, so the sum over all
+    # nodes can exceed the parallelism approved at job start.
     SELF["target_parallelism"] = 0
+    # Whether _slot_trade_loop may mint slots beyond those approved at job
+    # start. False until assignment proves the job is not parallelism-capped.
+    SELF["mint_slots_allowed"] = False
     SELF["replacement_deficit_since"] = None
     SELF["replacement_request_id"] = None
     SELF["last_replacement_request_at"] = 0.0

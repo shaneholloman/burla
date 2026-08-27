@@ -13,7 +13,6 @@ import psutil
 from node_service import (
     SELF,
     INSTANCE_NAME,
-    INSTANCE_N_CPUS,
     IN_LOCAL_DEV_MODE,
     NODE_AUTH_CREDENTIALS_PATH,
     NUM_GPUS,
@@ -45,10 +44,15 @@ WORKER_CLEANUP_TIMEOUT_SEC = 120
 REPLACEMENT_DEFICIT_WINDOW_SEC = 60
 REPLACEMENT_RETRY_SEC = 60
 
-# Pairwise slot trading (packing): how often a hungry node may ask its ring
-# neighbor for slots, and how far beyond one-worker-per-CPU it may grow.
+# Slot acquisition: how often a hungry node may ask its ring neighbor for
+# slots (and mint new ones when the neighbor has nothing to give), and how
+# many slots it may mint per attempt. Minting is capped per attempt so the
+# re-add loop (one boot per second, every add-gate re-checked) absorbs the
+# deficit well inside REPLACEMENT_DEFICIT_WINDOW_SEC; an unbounded mint would
+# read as a sustained deficit and boot replacement machines for slots this
+# node just invented.
 TRADE_INTERVAL_SEC = 15
-OVERSUBSCRIBE_MAX_WORKERS_PER_CPU = 2
+MINT_MAX_SLOTS_PER_ATTEMPT = 32
 # The set of nodes on a job changes rarely, so re-asking the head is cheap to do
 # seldom. Matches the client's wait before it hands a booting node the job.
 PEER_RECHECK_INTERVAL_SEC = 30
@@ -262,21 +266,23 @@ async def _input_steal_loop(session, logger, job_started_at):
 
 
 async def _slot_trade_loop(session, logger):
-    """Acquire slots from the ring neighbor when this node could productively
-    run more workers than it owns: it is at its slot count, unsaturated, and
-    has more queued inputs than workers (the blog's "add workers to a machine
-    to increase utilization ... remove workers elsewhere to stay below the
-    job's maximum allowed parallelism"). The neighbor gives up capacity it is
-    using worse (see `trade_slots` in job_endpoints.py); the re-add loop then
-    boots workers here toward the raised slot count, oversubscribing beyond
-    one per CPU. Only meaningful for fully dynamic jobs: with a fixed
+    """Raise this node's slot count when it could productively run more
+    workers than it owns: it is at its slot count, unsaturated, and has more
+    queued inputs than workers. Slots come from the ring neighbor first (it
+    gives up capacity it is using worse - see `trade_slots` in
+    job_endpoints.py - and a neighbor drained to zero frees its machine);
+    any remainder is minted outright when the job's parallelism is otherwise
+    unconstrained (see mint_slots_allowed in job_endpoints.py). The re-add
+    loop then boots workers toward the raised count one per second with every
+    add-gate re-checked, so saturation (CPU stall, disk IO stall, NIC
+    utilization, worker RSS) is the only ceiling on how far a node
+    oversubscribes. Only meaningful for fully dynamic jobs: with a fixed
     func_cpu/func_ram, packing extra workers in would break the per-call
     resource guarantee. GPU nodes never oversubscribe (one worker per GPU).
     """
     fully_dynamic = SELF["dynamic_func_cpu"] and SELF["dynamic_func_ram"]
     if not fully_dynamic or NUM_GPUS:
         return
-    max_workers = OVERSUBSCRIBE_MAX_WORKERS_PER_CPU * INSTANCE_N_CPUS
     can_check_cpu = CPU_PRESSURE_FILE.exists()
     stall_tracker = WorkerStallTracker()
     gate_sampler = AddGateSampler()
@@ -312,8 +318,6 @@ async def _slot_trade_loop(session, logger):
         # A deficit is the re-add / replacement paths' problem, not trading's.
         if len(alive_workers) != SELF["target_parallelism"]:
             continue
-        if len(alive_workers) >= max_workers:
-            continue
         queued_inputs = SELF["inputs_queue"].qsize()
         if queued_inputs <= len(alive_workers):
             continue
@@ -341,52 +345,73 @@ async def _slot_trade_loop(session, logger):
             neighbor_id, neighbor_host = await get_neighbor()
         except Exception:
             continue
-        if not neighbor_id:
-            continue
 
-        want = min(
-            queued_inputs - len(alive_workers),
-            max_workers - len(alive_workers),
-        )
-        # The id lives from the first send attempt until a response is seen,
-        # so a retry after a lost response replays the same trade instead of
-        # taking the neighbor's slots twice.
-        if SELF["slot_trade_id"] is None:
-            SELF["slot_trade_id"] = uuid4().hex
+        want = queued_inputs - len(alive_workers)
         SELF["last_slot_trade_attempt_at"] = time()
-        url = f"{neighbor_host}/jobs/{SELF['current_job']}/trade_slots"
-        params = {
-            "requesting_node": INSTANCE_NAME,
-            "slots_requested": want,
-            "trade_id": SELF["slot_trade_id"],
-        }
-        try:
-            async with session.post(
-                url, params=params, headers=SELF["auth_headers"]
-            ) as response:
-                if response.status == 404:
-                    # Neighbor is no longer on this job; nothing was granted.
-                    SELF["slot_trade_id"] = None
-                    continue
-                response.raise_for_status()
-                granted = int((await response.json()).get("slots_granted") or 0)
-        except Exception as error:
+        granted = 0
+        if neighbor_id:
+            # The id lives from the first send attempt until a response is
+            # seen, so a retry after a lost response replays the same trade
+            # instead of taking the neighbor's slots twice.
+            if SELF["slot_trade_id"] is None:
+                SELF["slot_trade_id"] = uuid4().hex
+            url = f"{neighbor_host}/jobs/{SELF['current_job']}/trade_slots"
+            params = {
+                "requesting_node": INSTANCE_NAME,
+                "slots_requested": want,
+                "trade_id": SELF["slot_trade_id"],
+            }
+            try:
+                async with session.post(
+                    url, params=params, headers=SELF["auth_headers"]
+                ) as response:
+                    if response.status == 404:
+                        # Neighbor is no longer on this job; nothing granted.
+                        SELF["slot_trade_id"] = None
+                        continue
+                    response.raise_for_status()
+                    granted = int(
+                        (await response.json()).get("slots_granted") or 0
+                    )
+            except Exception as error:
+                # The grant may have landed on the neighbor with the response
+                # lost; the replay on the next attempt settles it. Minting now
+                # on top of a grant that later replays would double-add, so
+                # skip this tick entirely.
+                await debug_log(
+                    "trade_failed",
+                    neighbor=neighbor_id,
+                    requested=want,
+                    error=f"{type(error).__name__}: {error}",
+                )
+                continue
+
+            SELF["slot_trade_id"] = None
+            if granted:
+                SELF["target_parallelism"] += granted
             await debug_log(
-                "trade_failed",
+                "trade_result",
                 neighbor=neighbor_id,
                 requested=want,
-                error=f"{type(error).__name__}: {error}",
+                granted=granted,
+                target_now=SELF["target_parallelism"],
             )
-            continue
 
-        SELF["slot_trade_id"] = None
-        if granted:
-            SELF["target_parallelism"] += granted
+        # The neighbor covered what it could; mint the rest. Every node on a
+        # saturated-but-idle job hits this path together, which is exactly the
+        # case trading can never help with (nobody has spares) and the reason
+        # minting exists.
+        if not SELF["mint_slots_allowed"]:
+            continue
+        minted = min(want - granted, MINT_MAX_SLOTS_PER_ATTEMPT)
+        if minted <= 0:
+            continue
+        SELF["target_parallelism"] += minted
         await debug_log(
-            "trade_result",
-            neighbor=neighbor_id,
-            requested=want,
-            granted=granted,
+            "slots_minted",
+            backlog=queued_inputs,
+            traded=granted,
+            minted=minted,
             target_now=SELF["target_parallelism"],
         )
 

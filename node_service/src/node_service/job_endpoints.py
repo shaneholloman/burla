@@ -460,6 +460,14 @@ async def execute(
     SELF["job_assigned_at"] = time()
     SELF["dynamic_func_ram"] = request_json["func_ram"] == "dynamic"
     SELF["dynamic_func_cpu"] = request_json["func_cpu"] == "dynamic"
+    # Minting (see _slot_trade_loop) pushes job-wide parallelism above the
+    # slot count approved at start, so it is only allowed when the user left
+    # max_parallelism unconstrained (>= n_inputs, its default). Assignments
+    # from clients too old to send the field never mint.
+    max_parallelism = request_json.get("max_parallelism")
+    SELF["mint_slots_allowed"] = (
+        max_parallelism is not None and max_parallelism >= request_json["n_inputs"]
+    )
     SELF["reboot_containers_after_job"] = False
     # In local-dev psutil.virtual_memory() inside the node container reports the
     # whole docker VM, not this node, so the monitor's "90% of total" trigger

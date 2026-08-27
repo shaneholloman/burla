@@ -475,6 +475,7 @@ class Node:
         packages: dict,
         func_cpu: int | str,
         func_ram: int | str,
+        max_parallelism: int,
         start_time: float,
         function_pkl: bytes,
         udf_error_event: Event,
@@ -487,6 +488,9 @@ class Node:
             "packages": packages,
             "func_cpu": func_cpu,
             "func_ram": func_ram,
+            # Nodes only mint slots (oversubscribe beyond the parallelism
+            # approved at start) when this shows the user left it uncapped.
+            "max_parallelism": max_parallelism,
             "start_time": start_time,
             "cluster_dashboard_url": self.client._url,
         }
@@ -679,6 +683,7 @@ class Node:
         packages: dict,
         func_cpu: int | str,
         func_ram: int | str,
+        max_parallelism: int,
         start_time: float,
         function_pkl: bytes,
         udf_error_event: Event,
@@ -721,6 +726,7 @@ class Node:
                 packages,
                 func_cpu,
                 func_ram,
+                max_parallelism,
                 start_time,
                 function_pkl,
                 udf_error_event,

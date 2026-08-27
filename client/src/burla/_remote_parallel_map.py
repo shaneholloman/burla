@@ -419,6 +419,7 @@ async def _execute_job(
                     packages=packages,
                     func_cpu=func_cpu,
                     func_ram=func_ram,
+                    max_parallelism=max_parallelism,
                     start_time=start_time,
                     function_pkl=function_pkl,
                     udf_error_event=udf_error_event,
@@ -474,6 +475,7 @@ async def _execute_job(
                             packages=packages,
                             func_cpu=func_cpu,
                             func_ram=func_ram,
+                            max_parallelism=max_parallelism,
                             start_time=start_time,
                             function_pkl=function_pkl,
                             udf_error_event=udf_error_event,
@@ -699,7 +701,9 @@ def remote_parallel_map(
             as possible. Adds up to 2560 cpus. Defaults to False.
         max_parallelism (int, optional):
             The maximum number of `function_` instances allowed to be running at the same time.
-            Defaults to the number of provided inputs.
+            Defaults to the number of provided inputs. When left at the default, nodes may run
+            more concurrent calls than vCPUs whenever CPU, memory, disk, and network all show
+            headroom; setting a value keeps concurrency at or below it.
         detach (bool, optional):
             If True, job will continue running on cluster, when canceled locally.
             Requires a deployed cluster (`burla deploy`): a dashboard running

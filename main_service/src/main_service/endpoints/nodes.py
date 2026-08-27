@@ -61,7 +61,12 @@ _NODE_STATE_FIELDS = (
 
 
 @router.put("/v1/nodes/{instance_name}/state")
-async def push_node_state(instance_name: str, request: Request):
+async def push_node_state(
+    instance_name: str,
+    request: Request,
+    add_background_task=Depends(get_add_background_task_function),
+    logger: Logger = Depends(get_logger),
+):
     # Nodes push every ~1s and retry forever; a node dropping mid-request
     # (e.g. while shutting down) is routine, not worth a traceback.
     try:
@@ -80,6 +85,31 @@ async def push_node_state(instance_name: str, request: Request):
             current_num_results=progress.get("current_num_results"),
             client_contact_last_1s=progress.get("client_contact_last_1s"),
         )
+
+    job_scope_id = merged.get("job_scope_id")
+    if job_scope_id and merged.get("status") in ("BOOTING", "READY", "RUNNING"):
+        job = cluster_state.get_job(job_scope_id)
+        assignment_finished = (
+            not merged.get("current_job") and not merged.get("reserved_for_job")
+        )
+        if job is None or job.get("status") != "RUNNING" or assignment_finished:
+            merged = cluster_state.update_node(
+                instance_name,
+                {
+                    "status": "DELETED",
+                    "ended_at": time(),
+                    "terminal_reason": {
+                        "code": "job_scope_finished",
+                        "source": "node_state",
+                        "message": (
+                            f"The grow node finished job {job_scope_id} "
+                            "and was deleted."
+                        ),
+                    },
+                },
+            )
+            node = Node.from_state(logger, merged, provider=get_provider())
+            add_background_task(node.delete)
 
     job_id = (progress or {}).get("job_id") or merged.get("current_job")
     response = {

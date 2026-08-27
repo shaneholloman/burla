@@ -152,6 +152,7 @@ class Node:
                 "zone": None,
                 "current_job": None,
                 "reserved_for_job": reserved_for_job,
+                "job_scope_id": reserved_for_job,
                 # Slots this reserved node covers; the client reads it from
                 # `GET /v1/jobs/{id}/nodes` to size the job assignment.
                 "target_parallelism": target_parallelism,
@@ -208,12 +209,13 @@ class Node:
                 booting_too_long = (time() - start) > NODE_BOOT_TIMEOUT
                 status = self.status()
 
-                # Startup-script trap reports FAILED over HTTP, bypassing the
-                # node_service path self.status() checks.
-                if status == "BOOTING":
-                    state = cluster_state.get_node(self.instance_name)
-                    if state and state.get("status") == "FAILED":
-                        status = "FAILED"
+                head_status = cluster_state.node_status(self.instance_name)
+                if head_status == "DELETED":
+                    raise InstanceDeletedMidBoot(
+                        f"Node {self.instance_name} deleted while starting."
+                    )
+                if status == "BOOTING" and head_status == "FAILED":
+                    status = "FAILED"
 
                 if status == "FAILED" or booting_too_long:
                     msg = f"Node {self.instance_name} Failed to start! (timeout={booting_too_long})"

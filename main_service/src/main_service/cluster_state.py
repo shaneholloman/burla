@@ -124,6 +124,12 @@ def get_node(instance_name: str) -> dict | None:
         return dict(node)
 
 
+def node_status(instance_name: str) -> str | None:
+    with _lock:
+        node = NODES.get(instance_name)
+        return node.get("status") if node else None
+
+
 def node_is_fresh(node: dict, now: float | None = None) -> bool:
     now = time() if now is None else now
     return now - node.get("last_push_at", 0) <= NODE_FRESHNESS_SEC
@@ -135,7 +141,7 @@ def update_node(instance_name: str, updates: dict) -> dict:
     Rules (previously enforced by scattered read-then-write firestore code):
     - BOOTING/READY/RUNNING never overwrite a terminal DELETED/FAILED status.
     - DELETED never overwrites FAILED (failed nodes stay visible for debugging).
-    - DELETED nodes are persisted to history then dropped from memory.
+    - DELETED nodes stay as tombstones so late pushes cannot resurrect them.
     """
     with _lock:
         node = NODES.get(instance_name, {"instance_name": instance_name})
@@ -162,6 +168,7 @@ def update_node(instance_name: str, updates: dict) -> dict:
             "zone",
             "current_job",
             "reserved_for_job",
+            "job_scope_id",
         }
         durable_changed = status_changed or bool(durable_fields.intersection(updates))
         if durable_changed:
@@ -252,6 +259,7 @@ def admit_job(
             or node.get("status") != "READY"
             or node.get("current_job")
             or node.get("reserved_for_job")
+            or node.get("job_scope_id")
             or not node_is_fresh(node)
             for node in selected
         ):

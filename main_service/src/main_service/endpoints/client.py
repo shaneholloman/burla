@@ -443,6 +443,9 @@ async def start_job(
         "function_size_gb": float(body.get("function_size_gb") or 0.0),
         "started_at": float(body.get("started_at") or time()),
         "is_background_job": bool(body.get("is_background_job")),
+        # raise_errors=False clients treat UDF exceptions as results, so
+        # failed calls must not make the job itself count as failed.
+        "raise_errors": bool(body.get("raise_errors", True)),
         # Set by nested rpm calls made from inside a worker: this job then
         # nests under the enclosing job in the dashboard instead of appearing
         # as its own top-level row.

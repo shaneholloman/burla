@@ -244,19 +244,20 @@ local-dev:
 dev-up:
 	@set -e; \
 	if nc -z localhost $(BURLA_HEAD_PORT) 2>/dev/null; then \
-		echo "Cluster [$(BURLA_CLUSTER_NAME)] is already up at $(BURLA_DASHBOARD_URL)"; \
+		echo "Head [$(BURLA_CLUSTER_NAME)] is already up at $(BURLA_DASHBOARD_URL)"; \
 		exit 0; \
 	fi; \
 	mkdir -p _local_dev_state; \
 	python3 -c 'import subprocess; p = subprocess.Popen(["make", "local-dev"], stdout=open("_local_dev_state/head.log", "w"), stderr=subprocess.STDOUT, start_new_session=True); open("_local_dev_state/head.pid", "w").write(str(p.pid))'; \
-	echo "Starting cluster [$(BURLA_CLUSTER_NAME)] detached (log: _local_dev_state/head.log)"; \
+	echo "Starting head [$(BURLA_CLUSTER_NAME)] detached (log: _local_dev_state/head.log)"; \
 	for i in $$(seq 1 120); do \
 		if nc -z localhost $(BURLA_HEAD_PORT) 2>/dev/null; then \
-			echo "Cluster [$(BURLA_CLUSTER_NAME)] is up at $(BURLA_DASHBOARD_URL)"; \
+			echo "Head [$(BURLA_CLUSTER_NAME)] is up at $(BURLA_DASHBOARD_URL)"; \
+			echo "Boot nodes: BURLA_CLUSTER_DASHBOARD_URL=$(BURLA_DASHBOARD_URL) BURLA_ENVIRONMENT=test uv run --project ./client burla cluster start"; \
 			exit 0; \
 		fi; \
 		if ! kill -0 $$(cat _local_dev_state/head.pid) 2>/dev/null; then \
-			echo "Cluster process exited during startup; last log lines:"; \
+			echo "Head process exited during startup; last log lines:"; \
 			tail -20 _local_dev_state/head.log; \
 			exit 1; \
 		fi; \

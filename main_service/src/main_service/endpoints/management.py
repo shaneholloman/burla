@@ -607,8 +607,11 @@ def _job_dto(raw: dict) -> dict:
     status = str(job.get("status") or "unknown").lower()
     # Canceled is authoritative: a canceled job's workers can flush one last
     # (error) result while dying, which would re-derive it as failed here.
+    # raise_errors=False jobs return UDF exceptions as results, so their
+    # failed calls don't make the job itself failed.
+    udf_errors_ignored = job.get("raise_errors") is False
     if status != "canceled" and input_count and result_count >= input_count:
-        status = "failed" if failed_count else "completed"
+        status = "failed" if failed_count and not udf_errors_ignored else "completed"
     started_at = job.get("started_at")
     ended_at = job.get("ended_at")
     notices = []

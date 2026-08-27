@@ -258,6 +258,7 @@ async def _execute_job(
     start_time: float,
     udf_error_event: Event,
     failure_diagnostics: list[str],
+    raise_errors: bool,
     grow: bool,
     image: Optional[str],
     func_gpu: Optional[FuncGpu],
@@ -316,6 +317,7 @@ async def _execute_job(
         "function_size_gb": function_size_gb,
         "started_at": start_time,
         "is_background_job": background,
+        "raise_errors": raise_errors,
         "grow": grow,
         "image": image,
         "func_gpu": func_gpu,
@@ -424,6 +426,7 @@ async def _execute_job(
                     return_queue=return_queue,
                     nodes=nodes,
                     first_chunk_barrier=first_chunk_barrier,
+                    raise_errors=raise_errors,
                 )
             )
         )
@@ -478,6 +481,7 @@ async def _execute_job(
                             return_queue=return_queue,
                             nodes=nodes,
                             first_chunk_barrier=None,
+                            raise_errors=raise_errors,
                         )
                     )
                 )
@@ -646,6 +650,7 @@ def remote_parallel_map(
     max_parallelism: Optional[int] = None,
     detach: bool = False,
     generator: bool = False,
+    raise_errors: bool = True,
     spinner: bool = True,
     region: Optional[str] = None,
     disk_gb: Optional[int] = None,
@@ -656,7 +661,8 @@ def remote_parallel_map(
     Run provided function_ on each item in inputs at the same time, each on a separate CPU.
     If more than inputs than there are cpu's are provided, inputs are queued and
     processed sequentially on each worker. Any exception raised by `function_`
-    (including its stack trace) will be re-raised here on the client machine.
+    (including its stack trace) will be re-raised here on the client machine
+    (unless `raise_errors=False`).
 
     Args:
         function_ (Callable):
@@ -702,6 +708,12 @@ def remote_parallel_map(
         generator (bool, optional):
             If True, returns a generator that yields outputs as they are produced; otherwise,
             returns a list of outputs once all have been processed. Defaults to False.
+        raise_errors (bool, optional):
+            If False, an exception raised by `function_` no longer fails the job: the
+            exception object is returned in the results in place of that call's return
+            value (with its remote traceback and ``burla_input_index`` attached), its
+            traceback is printed here, and the call still appears as failed in the
+            dashboard. All other calls run to completion. Defaults to True.
         spinner (bool, optional):
             If set to False, disables the display of the status indicator/spinner. Defaults to True.
         region (str, optional):
@@ -723,7 +735,8 @@ def remote_parallel_map(
 
     Raises:
         Any exception raised by `function_` on a worker is re-raised here on the
-        client. The raised exception has ``exc.burla_input_index`` set to the
+        client, unless ``raise_errors=False`` (then it is returned in the results
+        instead). The raised exception has ``exc.burla_input_index`` set to the
         index (in ``inputs``) of the item that triggered the failure, so you
         can identify which input broke without wrapping your UDF in try/except:
 
@@ -811,6 +824,7 @@ def remote_parallel_map(
                     generator=generator,
                     udf_error_event=udf_error_event,
                     failure_diagnostics=failure_diagnostics,
+                    raise_errors=raise_errors,
                     grow=grow,
                     image=image,
                     func_gpu=func_gpu,

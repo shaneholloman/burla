@@ -170,7 +170,7 @@ export const SettingsForm = forwardRef<
         <Card className="w-full divide-y divide-border/70">
             <section className="px-5 py-5">
                 <h2 className="text-sm font-semibold text-foreground">Container image</h2>
-                <div className="mt-4 max-w-2xl">
+                <div className="mt-4">
                     <div className="mb-1.5 flex items-center gap-1.5">
                         <label className={labelClass}>Image URI</label>
                         <TooltipProvider>
@@ -429,7 +429,7 @@ export const SettingsForm = forwardRef<
                             e.preventDefault();
                             addUser();
                         }}
-                        className="mt-4 flex w-full max-w-2xl gap-2"
+                        className="mt-4 flex w-full gap-2"
                     >
                         <Input
                             className="w-full"
@@ -443,7 +443,7 @@ export const SettingsForm = forwardRef<
                     </form>
 
                     {users.length > 0 && (
-                        <ul className="mt-4 max-w-2xl divide-y divide-border/70 rounded-lg border border-border">
+                        <ul className="mt-4 divide-y divide-border/70 rounded-lg border border-border">
                             {users.map((user) => (
                                 <li key={user} className="flex items-center justify-between gap-3 px-3.5 py-2.5">
                                     <span className="min-w-0 truncate text-sm text-foreground">{user}</span>

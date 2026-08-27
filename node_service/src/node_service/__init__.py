@@ -114,6 +114,7 @@ def REINIT_SELF(SELF):
     SELF["reboot_containers_after_job"] = False
     SELF["num_results_received"] = 0
     SELF["pending_transfers"] = {}
+    SELF["input_transfer_lock"] = asyncio.Lock()
     SELF["pending_result_batch"] = None
     SELF["pending_logs"] = deque(maxlen=MAX_PENDING_LOGS)
     SELF["pending_cluster_shutdown"] = False

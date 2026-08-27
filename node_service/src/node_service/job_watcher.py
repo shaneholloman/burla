@@ -86,6 +86,37 @@ async def get_neighbor():
     return neighbor_id, neighbor_host
 
 
+async def _neighbor_finished_scoped_job(neighbor_id: str) -> bool:
+    try:
+        node = await head_client.get_node_including_deleted(neighbor_id)
+    except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+        return False
+    if node is None:
+        return False
+    reason = node.get("terminal_reason") or {}
+    return (
+        node.get("status") == "DELETED"
+        and node.get("job_scope_id") == SELF["current_job"]
+        and reason.get("code") == "job_scope_finished"
+    )
+
+
+async def _claim_drained_job_part() -> bool:
+    # Serialize this decision with get_inputs so a peer cannot park a batch
+    # after this node has decided it is safe to leave the job.
+    async with SELF["input_transfer_lock"]:
+        drained = (
+            SELF["inputs_queue"].empty()
+            and not SELF["pending_transfers"]
+            and all(w.is_idle or w.retired for w in SELF["workers"])
+            and SELF["results_queue"].empty()
+            and SELF["pending_result_batch"] is None
+        )
+        if drained:
+            SELF["job_watcher_stop_event"].set()
+        return drained
+
+
 async def _input_steal_loop(session, logger, job_started_at):
     global SEC_NEIGHBOR_HAD_NO_INPUTS
 
@@ -187,7 +218,23 @@ async def _input_steal_loop(session, logger, job_started_at):
                     response.raise_for_status()
                 ack_ok = True
                 break
-            except Exception:
+            except Exception as error:
+                await debug_log(
+                    "transfer_ack_failed",
+                    transfer_id=transfer_id,
+                    neighbor=neighbor_id,
+                    received=received,
+                    error=f"{type(error).__name__}: {error}",
+                )
+                if await _neighbor_finished_scoped_job(neighbor_id):
+                    await debug_log(
+                        "transfer_ack_resolved_by_peer_completion",
+                        transfer_id=transfer_id,
+                        neighbor=neighbor_id,
+                        received=received,
+                    )
+                    ack_ok = True
+                    break
                 await asyncio.sleep(ACK_RETRY_DELAY_SEC)
 
         if not ack_ok:
@@ -597,14 +644,7 @@ async def _job_watcher(
         # timeout: its slots (and any requeued inputs) live elsewhere now, so
         # the machine is pure idle cost (this is what "packing into fewer
         # machines" frees).
-        traded_out = (
-            SELF["target_parallelism"] <= 0
-            and input_queue_empty
-            and all_workers_idle
-            and SELF["results_queue"].empty()
-            and pending_results_empty
-        )
-        if traded_out:
+        if SELF["target_parallelism"] <= 0 and await _claim_drained_job_part():
             steal_task.cancel()
             trade_task.cancel()
             await logger.log("All slots traded away and drained, done working on job!")
@@ -615,18 +655,14 @@ async def _job_watcher(
         if (
             SEC_NEIGHBOR_HAD_NO_INPUTS
             and SEC_NEIGHBOR_HAD_NO_INPUTS > EMPTY_NEIGHBOR_TIMEOUT_SEC
+            and await _claim_drained_job_part()
         ):
-            if (
-                SELF["results_queue"].empty()
-                and pending_results_empty
-                and all_workers_idle
-            ):
-                steal_task.cancel()
-                trade_task.cancel()
-                msg = f"Neighbor had no extra inputs for {EMPTY_NEIGHBOR_TIMEOUT_SEC}s"
-                await logger.log(msg + ", done working on job!")
-                await reset_workers(logger)
-                break
+            steal_task.cancel()
+            trade_task.cancel()
+            msg = f"Neighbor had no extra inputs for {EMPTY_NEIGHBOR_TIMEOUT_SEC}s"
+            await logger.log(msg + ", done working on job!")
+            await reset_workers(logger)
+            break
 
         # Job over?
         job_completed = False

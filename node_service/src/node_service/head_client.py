@@ -111,6 +111,16 @@ async def get_job(job_id: str) -> Optional[dict]:
         return await response.json()
 
 
+async def get_node_including_deleted(node_id: str) -> Optional[dict]:
+    session = _get_session()
+    url = f"{MAIN_SERVICE_URL}/v1/cluster/nodes/{node_id}?include_deleted=true"
+    async with session.get(url, headers=_HEADERS) as response:
+        if response.status == 404:
+            return None
+        response.raise_for_status()
+        return await response.json()
+
+
 async def update_job(
     job_id: str, updates: dict, append_fail_reason: Optional[str] = None
 ):

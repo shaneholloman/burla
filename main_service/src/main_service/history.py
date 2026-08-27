@@ -747,13 +747,6 @@ def job_task_summaries(
         ).fetchone()[0]
         filter_counts = None
         if include_filter_counts:
-            count_params = {
-                **params,
-                "failed_only": 0,
-                "logs_only": 0,
-                "has_metrics": 0,
-                "index": None,
-            }
             count_cte = _EVENT_SUMMARY_CTE if has_events else _SAMPLE_SUMMARY_CTE
             counts = conn.execute(
                 count_cte
@@ -761,10 +754,12 @@ def job_task_summaries(
 SELECT COUNT(*),
     COALESCE(SUM(api_status = 'running'), 0),
     COALESCE(SUM(api_status = 'failed'), 0),
-    COALESCE(SUM(has_logs), 0)
+    COALESCE(SUM(
+        has_logs AND (:status IS NULL OR api_status = :status)
+    ), 0)
 FROM flagged
 """,
-                count_params,
+                params,
             ).fetchone()
             filter_counts = {
                 "all": counts[0],

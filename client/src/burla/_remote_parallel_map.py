@@ -317,6 +317,7 @@ async def _execute_job(
         "function_size_gb": function_size_gb,
         "started_at": start_time,
         "is_background_job": background,
+        "raise_errors": raise_errors,
         "grow": grow,
         "image": image,
         "func_gpu": func_gpu,

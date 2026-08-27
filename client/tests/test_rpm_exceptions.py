@@ -1,5 +1,8 @@
 """End-to-end exception propagation and node-selection errors."""
 
+import time
+from datetime import datetime
+
 import pytest
 
 
@@ -37,13 +40,16 @@ def test_udf_error_preserves_traceback(rpm_subprocess, local_dev_cluster):
     assert "The above exception was the direct cause" in result["traceback"]
 
 
-def test_udf_errors_returned_when_raise_errors_false(rpm_subprocess, local_dev_cluster):
+def test_udf_errors_returned_when_raise_errors_false(
+    rpm_subprocess, local_dev_cluster, main_http_client, wait_for_fixture
+):
     source = (
         "def test_function(x):\n"
         "    if x % 3 == 0:\n"
         "        raise ValueError(f'boom on {x}')\n"
         "    return x * 10\n"
     )
+    started_after = time.time() - 1
     result = rpm_subprocess(
         source, list(range(10)), timeout_seconds=60, raise_errors=False
     )
@@ -57,6 +63,22 @@ def test_udf_errors_returned_when_raise_errors_false(rpm_subprocess, local_dev_c
     assert successes == [10, 20, 40, 50, 70, 80]
     # Tracebacks are still printed even though nothing is raised.
     assert "ValueError: boom on 3" in result["stdout"]
+
+    # Ignored UDF errors mark the calls failed but never the job: every
+    # surface derives it as completed once its error logs land on the head.
+    def _this_job():
+        jobs = main_http_client.get("/v1/management/jobs?limit=50").json()["items"]
+        for job in jobs:
+            if job["function_name"] != "test_function" or job["failed_count"] != 4:
+                continue
+            if datetime.fromisoformat(job["started_at"]).timestamp() >= started_after:
+                return job
+        return None
+
+    job = wait_for_fixture(
+        _this_job, timeout=30, message="job with 4 failed calls never appeared"
+    )
+    assert job["status"] == "completed"
 
 
 def test_burla_exception_re_raised_on_client(rpm_subprocess, local_dev_cluster):

@@ -535,11 +535,14 @@ async def list_cluster_nodes():
 
 
 @router.get("/v1/cluster/nodes/{node_id}")
-async def get_cluster_node(node_id: str):
+async def get_cluster_node(node_id: str, include_deleted: bool = False):
     """
-    Read a single node's live state. Used by the client to poll a BOOTING node.
+    Read a single node's live state. Deleted state is opt-in because BOOTING
+    polling treats an absent node differently from a terminal tombstone.
     """
     data = cluster_state.get_node(node_id)
+    if data is None and include_deleted:
+        data = await asyncio.to_thread(history.management_node, node_id)
     if data is None:
         raise HTTPException(status_code=404, detail="node not found")
     return data

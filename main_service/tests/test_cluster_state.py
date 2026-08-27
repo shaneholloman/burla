@@ -78,6 +78,28 @@ def test_get_node_404_when_not_in_cache(main_http_client, local_dev_cluster):
     assert resp.status_code == 404
 
 
+def test_get_node_can_include_persisted_deleted_state(
+    main_http_client, node_push_client, local_dev_cluster
+):
+    instance_name = f"burla-node-deleted{int(time.time())%100000}"
+    _push_node_state(
+        node_push_client,
+        instance_name,
+        {"status": "READY", "started_booting_at": time.time()},
+    )
+    _push_node_state(node_push_client, instance_name, {"status": "DELETED"})
+
+    default_response = main_http_client.get(f"/v1/cluster/nodes/{instance_name}")
+    assert default_response.status_code == 404
+
+    deleted_response = main_http_client.get(
+        f"/v1/cluster/nodes/{instance_name}",
+        params={"include_deleted": True},
+    )
+    assert deleted_response.status_code == 200
+    assert deleted_response.json()["status"] == "DELETED"
+
+
 def test_get_node_fail_reason_returns_first_matching_error(
     main_http_client, node_push_client, local_dev_cluster
 ):

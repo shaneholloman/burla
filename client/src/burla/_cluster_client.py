@@ -250,6 +250,11 @@ class ClusterClient:
     async def get_node(self, node_id: str) -> Optional[dict]:
         return await self._request("GET", f"/v1/cluster/nodes/{node_id}")
 
+    async def get_node_including_deleted(self, node_id: str) -> Optional[dict]:
+        return await self._request(
+            "GET", f"/v1/cluster/nodes/{node_id}?include_deleted=true"
+        )
+
     async def get_node_fail_reason(self, node_id: str) -> Optional[str]:
         # Swallow all errors — a failed enrichment lookup must never escalate
         # into a worse error than the NodeDisconnected the caller is already

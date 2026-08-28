@@ -28,7 +28,7 @@ from jinja2 import Environment, FileSystemLoader
 from starlette.datastructures import UploadFile
 from starlette.middleware.sessions import SessionMiddleware
 
-CURRENT_BURLA_VERSION = "1.7.11"
+CURRENT_BURLA_VERSION = "1.7.12"
 MIN_COMPATIBLE_CLIENT_VERSION = "1.7.11"
 NODE_SOURCE_REF = os.environ.get("BURLA_NODE_SOURCE_REF", CURRENT_BURLA_VERSION)
 
@@ -89,6 +89,9 @@ BURLA_RELAY_HOST = (
 )
 BURLA_RELAY_SERVER_ADDR = os.environ.get("BURLA_RELAY_SERVER_ADDR") or BURLA_RELAY_HOST
 BURLA_RELAY_SERVER_PORT = int(os.environ.get("BURLA_RELAY_SERVER_PORT", 7000))
+BURLA_RELAY_TRANSPORT_PROTOCOL = os.environ.get(
+    "BURLA_RELAY_TRANSPORT_PROTOCOL", "tcp"
+)
 FRP_VERSION = "0.70.1"
 print(f"Using Burla backend: {BURLA_BACKEND_URL}")
 

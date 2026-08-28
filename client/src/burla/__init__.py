@@ -7,16 +7,19 @@ from urllib.parse import urlparse
 from platformdirs import user_config_dir
 
 # needed so main_service can associate a client version with a request
-__version__ = "1.7.11"
+__version__ = "1.7.12"
 
 # In a checkout this file is <root>/client/src/burla/__init__.py. Installed
 # flat (e.g. /worker_service_python_env/burla/ on nodes) there is no parents[3],
 # so guard the depth or importing burla crashes there.
 _parents = Path(__file__).resolve().parents
 _SOURCE_ROOT = _parents[3] if len(_parents) > 3 else None
+# In the monorepo the burla repo root sits one directory below the git root
+# (which in a linked worktree is a .git file, not a directory), so accept
+# .git at the source root or its parent.
 _IN_SOURCE_CHECKOUT = _SOURCE_ROOT is not None and (
-    (_SOURCE_ROOT / ".git").exists()
-    and (_SOURCE_ROOT / "client" / "pyproject.toml").exists()
+    (_SOURCE_ROOT / "client" / "pyproject.toml").exists()
+    and ((_SOURCE_ROOT / ".git").exists() or (_SOURCE_ROOT.parent / ".git").exists())
 )
 _IN_HEAD_RUNTIME = os.environ.get("BURLA_HEAD_RUNTIME") == "True"
 _BURLA_ENVIRONMENT = os.environ.get("BURLA_ENVIRONMENT", "production").lower()

@@ -13,6 +13,10 @@ import { cn } from "@/lib/utils";
 import { managementJson } from "@/lib/managementApi";
 
 type JobResultStats = {
+    // Stats outlive navigation between jobs (the page keeps rendering the old
+    // job until the new fetch lands), so consumers that must not mix jobs
+    // check this id.
+    jobId: string;
     n_inputs: number;
     n_results: number;
     n_failed: number;
@@ -32,6 +36,45 @@ const formatDuration = (seconds: number): string => {
     if (m < 60) return `${m}m ${s % 60}s`;
     const h = Math.floor(m / 60);
     return `${h}h ${m % 60}m`;
+};
+
+// Throughput window for the time-remaining estimate: long enough to smooth
+// bursty completions, short enough to track the cluster ramping up.
+const ETA_WINDOW_MS = 45_000;
+// Below this much sampled history the window rate is dominated by completion
+// burst noise (workers finish in clumps), so the lifetime average wins.
+const ETA_MIN_WINDOW_MS = 20_000;
+// Per-poll smoothing of the throughput estimate: damps burst noise while
+// still following a genuine ramp-up within a few polls.
+const ETA_SMOOTHING = 0.25;
+
+type ProgressSample = { atMs: number; finished: number };
+
+// Recent-window throughput is the primary signal; a too-short window or one
+// with no completions (calls that outlast it) falls back to the lifetime
+// average. Zero means nothing has finished yet, so no basis for a guess.
+const throughputPerMs = (samples: ProgressSample[], startedAtMs: number | undefined): number => {
+    const first = samples[0];
+    const last = samples[samples.length - 1];
+    const span = last.atMs - first.atMs;
+    if (span >= ETA_MIN_WINDOW_MS && last.finished > first.finished) {
+        return (last.finished - first.finished) / span;
+    }
+    if (startedAtMs != null && last.atMs > startedAtMs) return last.finished / (last.atMs - startedAtMs);
+    return 0;
+};
+
+// Precision narrows as the estimate grows, both because confidence shrinks
+// and so the displayed value doesn't twitch on every re-estimate.
+const formatEta = (seconds: number): string => {
+    const s = Math.max(0, Math.round(seconds));
+    if (s < 5) return "< 5s";
+    if (s < 60) return `~${s}s`;
+    const m = Math.floor(s / 60);
+    if (m < 10) return `~${m}m ${s % 60}s`;
+    if (m < 60) return `~${m}m`;
+    const h = Math.floor(m / 60);
+    return `~${h}h ${m % 60}m`;
 };
 
 const Unknown = () => <span className="text-muted-foreground">unknown</span>;
@@ -173,6 +216,7 @@ const JobDetails = () => {
 
     const job = jobs.find((j) => j.id === jobId) ?? fetchedJob ?? undefined;
     const isLiveJob = job?.status === "RUNNING" || job?.status === "PENDING";
+    const startedAtMs = job?.started_at?.getTime();
 
     // Live duration ticks once per second while the job runs.
     const [nowMs, setNowMs] = useState(() => Date.now());
@@ -182,6 +226,37 @@ const JobDetails = () => {
         const id = window.setInterval(() => setNowMs(Date.now()), 1000);
         return () => window.clearInterval(id);
     }, [isLiveJob]);
+
+    // Time-remaining estimate, re-anchored on each stats poll and counted
+    // down by the same 1s tick as Duration between polls.
+    const progressSamplesRef = useRef<ProgressSample[]>([]);
+    const smoothedRateRef = useRef<number | null>(null);
+    const [eta, setEta] = useState<{ seconds: number; atMs: number } | null>(null);
+    useEffect(() => {
+        progressSamplesRef.current = [];
+        smoothedRateRef.current = null;
+        setEta(null);
+    }, [jobId]);
+    useEffect(() => {
+        if (!stats || stats.jobId !== jobId || !isLiveJob) return;
+        const now = Date.now();
+        const samples = progressSamplesRef.current;
+        samples.push({ atMs: now, finished: stats.n_results });
+        // Keep one sample older than the window so the measured span never
+        // collapses below it.
+        while (samples.length > 2 && samples[1].atMs <= now - ETA_WINDOW_MS) samples.shift();
+        const rate = throughputPerMs(samples, startedAtMs);
+        if (rate <= 0) {
+            smoothedRateRef.current = null;
+            setEta(null);
+            return;
+        }
+        const previous = smoothedRateRef.current;
+        const smoothed = previous == null ? rate : previous + ETA_SMOOTHING * (rate - previous);
+        smoothedRateRef.current = smoothed;
+        const remaining = Math.max(0, stats.n_inputs - stats.n_results);
+        setEta({ seconds: remaining / smoothed / 1000, atMs: now });
+    }, [stats, jobId, isLiveJob, startedAtMs]);
 
     // Navigating between jobs (graph nodes, breadcrumbs) deliberately does NOT
     // reset to the loading screen: the page stays mounted, keeping layout and
@@ -207,6 +282,7 @@ const JobDetails = () => {
                 });
                 if (cancelled) return;
                 setStats({
+                    jobId,
                     n_inputs: Number(payload?.input_count ?? 0),
                     n_results: Number(payload?.result_count ?? 0),
                     n_failed: Number(payload?.failed_count ?? 0),
@@ -313,7 +389,6 @@ const JobDetails = () => {
     const badge = jobStatusBadge(job.status);
     const canStop = job.status === "RUNNING" || job.status === "PENDING";
 
-    const startedAtMs = job.started_at?.getTime();
     const endedAtMs = job.ended_at?.getTime();
     let durationValue: React.ReactNode = <Unknown />;
     if (startedAtMs != null && isLiveJob) {
@@ -347,6 +422,22 @@ const JobDetails = () => {
             label: "Duration",
             value: <span className="tabular-nums">{durationValue}</span>,
         },
+        ...(isLiveJob
+            ? [
+                  {
+                      label: "Est. time remaining",
+                      value: (
+                          <span className="tabular-nums">
+                              {eta == null ? (
+                                  <span className="text-muted-foreground">Estimating…</span>
+                              ) : (
+                                  formatEta(eta.seconds - (nowMs - eta.atMs) / 1000)
+                              )}
+                          </span>
+                      ),
+                  },
+              ]
+            : []),
         {
             label: "Max parallelism",
             value: (

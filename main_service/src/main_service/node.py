@@ -15,6 +15,7 @@ from main_service import (
     BURLA_BACKEND_URL,
     BURLA_RELAY_SERVER_ADDR,
     BURLA_RELAY_SERVER_PORT,
+    BURLA_RELAY_TRANSPORT_PROTOCOL,
     CLOUD_PROVIDER,
     CLUSTER_ID_TOKEN,
     CURRENT_BURLA_VERSION,
@@ -428,6 +429,7 @@ class Node:
         loginFailExit = false
         user = "{PROJECT_ID}"
         metadatas.token = "{CLUSTER_ID_TOKEN}"
+        transport.protocol = "{BURLA_RELAY_TRANSPORT_PROTOCOL}"
         transport.poolCount = 4
 
         [[proxies]]

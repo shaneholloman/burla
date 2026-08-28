@@ -52,8 +52,11 @@ from burla._auth import (
 from burla._helpers import CREATE_NO_WINDOW
 
 RELAY_HOST = _BURLA_RELAY_HOST.strip().lower()
-RELAY_SERVER_ADDR = os.environ.get("BURLA_RELAY_SERVER_ADDR", RELAY_HOST)
-RELAY_SERVER_PORT = os.environ.get("BURLA_RELAY_SERVER_PORT", "7000")
+RELAY_SERVER_ADDR = os.environ.get(
+    "BURLA_RELAY_SERVER_ADDR", urlparse(_BURLA_BACKEND_URL).hostname
+)
+RELAY_SERVER_PORT = os.environ.get("BURLA_RELAY_SERVER_PORT", "443")
+RELAY_TRANSPORT_PROTOCOL = os.environ.get("BURLA_RELAY_TRANSPORT_PROTOCOL", "wss")
 FRP_VERSION = "0.70.1"
 
 PREFERRED_HEAD_PORT = 5001  # the browser login flow redirects to localhost:5001
@@ -185,6 +188,7 @@ serverPort = {RELAY_SERVER_PORT}
 loginFailExit = false
 user = "{project_id}"
 metadatas.token = "{cluster_token}"
+transport.protocol = "{RELAY_TRANSPORT_PROTOCOL}"
 transport.poolCount = 4
 
 [[proxies]]
@@ -679,6 +683,7 @@ def _run_local_head(
             )
         if not _pid_alive(head_state.get("frpc_pid")):
             _respawn_frpc(state_dir, head_state)
+        _wait_for_relay_ready(state_dir, head_state, saved_token)
         if on_ready:
             on_ready(url, False)
         return url
@@ -715,6 +720,7 @@ def _run_local_head(
         "BURLA_RELAY_HOST": RELAY_HOST,
         "BURLA_RELAY_SERVER_ADDR": RELAY_SERVER_ADDR,
         "BURLA_RELAY_SERVER_PORT": str(RELAY_SERVER_PORT),
+        "BURLA_RELAY_TRANSPORT_PROTOCOL": RELAY_TRANSPORT_PROTOCOL,
         "BURLA_NODE_SOURCE_REF": node_source_ref or _BURLA_NODE_SOURCE_REF,
         "MAIN_SERVICE_URL_FOR_NODES": f"https://{subdomain}.{RELAY_HOST}",
         "PORT": str(head_port),
@@ -778,6 +784,7 @@ def _run_local_head(
             detached=True,
         )
         _respawn_frpc(state_dir, head_state, cluster_token=cluster_token)
+        _wait_for_relay_ready(state_dir, head_state, cluster_token)
         return url
 
     frpc_process = None
@@ -792,6 +799,7 @@ def _run_local_head(
             detached=False,
         )
         frpc_process = _respawn_frpc(state_dir, head_state, cluster_token=cluster_token)
+        _wait_for_relay_ready(state_dir, head_state, cluster_token)
         if on_ready:
             on_ready(url, True)
         return_code = head_process.wait()
@@ -1069,3 +1077,24 @@ def _respawn_frpc(
     head_state["frpc_pid"] = frpc_process.pid
     (state_dir / "head.json").write_text(json.dumps(head_state))
     return frpc_process
+
+
+def _wait_for_relay_ready(state_dir: Path, head_state: dict, cluster_token: str):
+    url = f"https://{head_state['subdomain']}.{RELAY_HOST}/version"
+    headers = {"Authorization": f"Bearer {cluster_token}"}
+    ca_cert = state_dir / "tls" / "cluster-ca.pem"
+    start = time()
+    while time() - start < 15:
+        try:
+            response = requests.get(url, headers=headers, verify=ca_cert, timeout=2)
+            response.raise_for_status()
+            return
+        except requests.RequestException:
+            sleep(0.5)
+
+    frpc_log = (state_dir / "frpc.log").read_text()[-3000:]
+    raise LocalHeadError(
+        "Burla could not establish its relay tunnel through "
+        f"{RELAY_SERVER_ADDR}:{RELAY_SERVER_PORT} "
+        f"using {RELAY_TRANSPORT_PROTOCOL}.\n{frpc_log}"
+    )

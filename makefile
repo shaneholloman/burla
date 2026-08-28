@@ -7,7 +7,10 @@ PROJECT_ABS := $(abspath $(UV_PROJECT))
 # One dev cluster per checkout. Several run side by side on one machine, so
 # every daemon-global or host-global name they need (docker network, container
 # labels, published head port, published node ports) derives from this name.
-BURLA_CLUSTER_NAME ?= $(shell basename "$(CURDIR)" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')
+# Named after the git worktree root, not CURDIR: in the monorepo this
+# directory is always "burla", so CURDIR would give every worktree's cluster
+# the same identity.
+BURLA_CLUSTER_NAME ?= $(shell basename "$$(git rev-parse --show-toplevel 2>/dev/null || pwd)" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')
 BURLA_CLUSTER_NETWORK := burla-$(BURLA_CLUSTER_NAME)
 # Hashed rather than allocated so a checkout's dashboard URL and node ports stay
 # the same across restarts. Override either if two checkouts ever collide.

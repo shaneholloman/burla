@@ -49,16 +49,27 @@ jobs:
                           return ast.literal_eval(statement.value)
               raise AssertionError(f"{name} missing from {path}")
 
+          release_tag = os.environ["RELEASE_TAG"]
           versions = {
               client_version,
               main_version,
               node_version,
               assignment("client/src/burla/__init__.py", "__version__"),
               assignment("main_service/src/main_service/__init__.py", "CURRENT_BURLA_VERSION"),
-              assignment("main_service/src/main_service/__init__.py", "MIN_COMPATIBLE_CLIENT_VERSION"),
               assignment("node_service/src/node_service/__init__.py", "__version__"),
           }
-          assert versions == {os.environ["RELEASE_TAG"]}, versions
+          assert versions == {release_tag}, versions
+
+          min_compatible = assignment(
+              "main_service/src/main_service/__init__.py",
+              "MIN_COMPATIBLE_CLIENT_VERSION",
+          )
+          assert tuple(map(int, min_compatible.split("."))) <= tuple(
+              map(int, release_tag.split("."))
+          ), (
+              min_compatible,
+              release_tag,
+          )
           PY
           RELEASE_SHA=$(git rev-list -n 1 "$RELEASE_TAG")
           git fetch origin main

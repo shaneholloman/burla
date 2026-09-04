@@ -472,6 +472,12 @@ with socket.create_server(("0.0.0.0", port)) as listener:
                     request = pickle.loads(request_payload)
                     input_index = request["input_index"]
                     argument = cloudpickle.loads(request["argument_bytes"])
+                    # Fresh id per UDF invocation: nested rpm calls key their
+                    # happens-before bookkeeping on it, so a retried input
+                    # can never continue a previous attempt's call chain.
+                    os.environ["BURLA_PARENT_RUN_ID"] = (
+                        f"{input_index}-{uuid4().hex[:8]}"
+                    )
                     try:
                         print(f"{LOG_START_MARKER_PREFIX}{input_index}", flush=True)
                         return_value = loaded_function(argument)

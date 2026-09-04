@@ -14,6 +14,8 @@ export const useSaveSettings = () => {
                     region: settings.gcpRegion,
                     disk_gb: settings.diskSize,
                     inactivity_timeout_seconds: settings.inactivityTimeout * 60,
+                    max_vcpus: settings.maxVcpus,
+                    max_gpus: settings.maxGpus,
                 }),
             });
             const usersResponse = await fetch("/v1/settings", {

@@ -16,7 +16,8 @@ import asyncio
 import threading
 from time import time
 
-from main_service import history
+from main_service import history, keep_awake
+from main_service.providers.catalog import gpu_model, machine_spec
 
 _lock = threading.RLock()
 
@@ -60,6 +61,8 @@ def load_from_history():
             job.pop("n_results", None)
             job["assigned_nodes"] = {}
             JOBS.setdefault(job_id, job)
+        has_live_nodes = _has_live_nodes()
+    keep_awake.set_active(has_live_nodes)
 
 
 def _publish(queues, event: dict):
@@ -107,11 +110,37 @@ def unsubscribe(queue: asyncio.Queue):
 # ------------------------------------------------------------------ nodes
 
 
+def _has_live_nodes() -> bool:
+    """Must be called with _lock held."""
+    return any(
+        node.get("status") in ("BOOTING", "READY", "RUNNING")
+        for node in NODES.values()
+    )
+
+
 def list_nodes() -> list[dict]:
     with _lock:
         return [
             dict(node) for node in NODES.values() if node.get("status") != "DELETED"
         ]
+
+
+def fleet_resources() -> tuple[int, dict]:
+    """(total vCPUs on live CPU machines, {gpu_model: live gpu count}).
+    BOOTING nodes count so concurrent grows can't race past a global cap."""
+    cpu_vcpus = 0
+    gpus: dict[str, int] = {}
+    with _lock:
+        for node in NODES.values():
+            if node.get("status") not in ("BOOTING", "READY", "RUNNING"):
+                continue
+            spec = machine_spec(node["machine_type"])
+            if spec["gpus"] > 0:
+                model = gpu_model(node["machine_type"])
+                gpus[model] = gpus.get(model, 0) + spec["gpus"]
+            else:
+                cpu_vcpus += spec["cpus"]
+    return cpu_vcpus, gpus
 
 
 def get_node(instance_name: str) -> dict | None:
@@ -174,7 +203,10 @@ def update_node(instance_name: str, updates: dict) -> dict:
         if durable_changed:
             history.upsert_node(instance_name, merged)
         NODES[instance_name] = node
+        has_live_nodes = _has_live_nodes() if status_changed else None
 
+    if status_changed:
+        keep_awake.set_active(has_live_nodes)
     if status_changed or "host" in updates or "current_job" in updates:
         deleted = merged.get("status") == "DELETED"
         _publish(_node_event_queues, {"deleted": deleted, **merged})
@@ -192,6 +224,8 @@ def remove_node(instance_name: str):
     """Drop a node from live state without marking it DELETED (dev cleanup)."""
     with _lock:
         node = NODES.pop(instance_name, None)
+        has_live_nodes = _has_live_nodes()
+    keep_awake.set_active(has_live_nodes)
     if node:
         _publish(_node_event_queues, {"deleted": True, **node})
 
@@ -442,6 +476,8 @@ def update_job_progress(
     instance_name: str,
     current_num_results: int | None = None,
     client_contact_last_1s: bool | None = None,
+    alive_workers: int | None = None,
+    busy_workers: int | None = None,
 ):
     with _lock:
         job = _get_or_load_job(job_id)
@@ -454,11 +490,39 @@ def update_job_progress(
             progress["current_num_results"] = current_num_results
         if client_contact_last_1s is not None:
             progress["client_contact_last_1s"] = client_contact_last_1s
+        if alive_workers is not None:
+            progress["alive_workers"] = alive_workers
+        if busy_workers is not None:
+            progress["busy_workers"] = busy_workers
         now = time()
         progress["last_push_at"] = now
         if now - _counts_flushed_at.get(job_id, 0) >= COUNTS_FLUSH_INTERVAL_SEC:
             _counts_flushed_at[job_id] = now
             history.upsert_job_and_nodes(job_id, dict(job), [])
+
+
+def job_mint_inputs() -> list[tuple[str, int, int, int]]:
+    """(job_id, total_results, alive_workers, busy_workers) per RUNNING job,
+    for the mint controller's tick. Results count every node ever assigned
+    (a node that finished its share and left still produced them; dropping
+    it would read as negative goodput), but only fresh-pushing nodes
+    contribute workers."""
+    with _lock:
+        out = []
+        now = time()
+        for job_id, job in JOBS.items():
+            if job.get("status") != "RUNNING":
+                continue
+            total = 0
+            alive = 0
+            busy = 0
+            for progress in job["assigned_nodes"].values():
+                total += progress.get("current_num_results", 0)
+                if now - progress.get("last_push_at", 0) <= NODE_FRESHNESS_SEC:
+                    alive += progress.get("alive_workers") or 0
+                    busy += progress.get("busy_workers") or 0
+            out.append((job_id, total, alive, busy))
+        return out
 
 
 def job_view(job_id: str) -> dict:
@@ -521,11 +585,11 @@ def nodes_for_job(job_id: str) -> list[dict]:
 
 
 def record_replacement_request(
-    job_id: str, requesting_node: str, request: dict, cpus_booted: int
+    job_id: str, requesting_node: str, request: dict, cpus_booted: int, gpus_booted: int
 ):
     """Persist a replacement boot under the state lock: the idempotency entry
     (nodes retry with the same request_id when a response is lost) and the
-    CPU-budget decrement must not race concurrent requests from other nodes."""
+    budget decrements must not race concurrent requests from other nodes."""
     with _lock:
         job = _get_or_load_job(job_id)
         if job is None:
@@ -534,6 +598,10 @@ def record_replacement_request(
         if job.get("grow_cpus_remaining") is not None:
             job["grow_cpus_remaining"] = max(
                 0, job["grow_cpus_remaining"] - cpus_booted
+            )
+        if job.get("grow_gpus_remaining") is not None:
+            job["grow_gpus_remaining"] = max(
+                0, job["grow_gpus_remaining"] - gpus_booted
             )
         history.upsert_job_and_nodes(job_id, dict(job), [])
 

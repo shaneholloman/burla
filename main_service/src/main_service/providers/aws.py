@@ -205,6 +205,11 @@ class AWSProvider:
         return public_ip, private_ip, zone
 
     def delete_instance(self, instance_name: str, zone: str | None = None):
+        # A successful terminate call is enough: AWS finishes it server-side,
+        # and a terminating instance stops counting toward vCPU quotas.
+        # Botocore's instance_terminated waiter must not be used to watch it
+        # finish: it treats a still-pending instance as a failure, and nodes
+        # are routinely deleted mid-boot (cluster restart during a grow).
         cached = _instance_ids.pop(instance_name, None)
         if cached:
             instance_id, region = cached
@@ -214,9 +219,6 @@ class AWSProvider:
             for attempt in range(5):
                 try:
                     ec2.terminate_instances(InstanceIds=[instance_id])
-                    ec2.get_waiter("instance_terminated").wait(
-                        InstanceIds=[instance_id]
-                    )
                     return
                 except ClientError as error:
                     if error.response["Error"]["Code"] != "InvalidInstanceID.NotFound":
@@ -242,7 +244,6 @@ class AWSProvider:
         ]
         if instance_ids:
             ec2.terminate_instances(InstanceIds=instance_ids)
-            ec2.get_waiter("instance_terminated").wait(InstanceIds=instance_ids)
 
     def existing_instances(self, instance_names: list[str], region: str) -> set[str]:
         """Which of these instances still exist in any non-terminated state.

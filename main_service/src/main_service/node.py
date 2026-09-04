@@ -18,12 +18,10 @@ from main_service import (
     BURLA_RELAY_TRANSPORT_PROTOCOL,
     CLOUD_PROVIDER,
     CLUSTER_ID_TOKEN,
-    CURRENT_BURLA_VERSION,
     FRP_VERSION,
     IN_CLIENT_HOSTED_MODE,
     IN_LOCAL_DEV_MODE,
     MAIN_SERVICE_URL_FOR_NODES,
-    NODE_SOURCE_REF,
     PROJECT_ID,
     SELF_DELETE_GUEST_ATTRIBUTE,
     cluster_state,
@@ -170,12 +168,14 @@ class Node:
                     reserved_for_job=reserved_for_job,
                 )
             else:
+                # The startup script puts a RAM-sized swapfile on the root
+                # volume; grow it by that much so the user's disk stays theirs.
                 self.public_ip, self.private_ip, self.zone = (
                     self.provider.create_instance(
                         instance_name=self.instance_name,
                         machine_type=machine_type,
                         region=region,
-                        disk_size=self.disk_size,
+                        disk_size=self.disk_size + machine_spec(machine_type)["ram_gb"],
                         spot=spot,
                         num_gpus=self.num_gpus,
                         port=self.port,
@@ -420,7 +420,7 @@ class Node:
         )
         relay_tunnel_script = f"""
         report_log "Connecting relay tunnel {subdomain} ..."
-        curl -fsSL -o /tmp/frp.tgz {frp_url}
+        curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/frp.tgz {frp_url}
         tar -xzf /tmp/frp.tgz -C /tmp
         cp /tmp/{frp_dir}/frpc /usr/local/bin/frpc
         cat > /etc/burla/frpc.toml <<FRPC_EOF
@@ -531,8 +531,6 @@ class Node:
         export PATH="/root/.cargo/bin:$PATH"
         export PATH="/root/.local/bin:$PATH"
 
-        report_log "Installing Burla node service v{CURRENT_BURLA_VERSION} ..."
-
         export NUM_GPUS="{self.num_gpus}"
         export INSTANCE_NAME="$NODE_NAME"
         export PROJECT_ID="{PROJECT_ID}"
@@ -544,11 +542,26 @@ class Node:
         export BURLA_BACKEND_URL="{BURLA_BACKEND_URL}"
 
         cd /opt/burla
+        # This node's code always comes from its head, so it runs exactly what
+        # the head runs (a dev head serves its working tree, uncommitted edits
+        # included). The node images' pre-cloned repo here only pre-warms
+        # /opt/burla/.venv at image build time and is overwritten now.
         # main_service is needed because building the client from source
         # vendors it into the wheel (client-hosted mode).
-        git sparse-checkout set node_service client main_service
-        git fetch --depth=1 origin "{NODE_SOURCE_REF}"
-        git reset --hard FETCH_HEAD
+        rm -rf node_service client main_service
+        source_attempts=0
+        until curl --fail --silent --show-error --cacert "$HEAD_CA_PATH" \\
+            -X GET "$HEAD_URL/v1/node-source" -H "$AUTH_HEADER" \\
+            -o /tmp/burla_source.tar.gz; do
+            source_attempts=$((source_attempts + 1))
+            if [ "$source_attempts" -ge 10 ]; then
+                echo "Giving up: could not download node source from $HEAD_URL."
+                false
+            fi
+            sleep 1
+        done
+        tar -xzf /tmp/burla_source.tar.gz -C /opt/burla
+        report_log "Installing Burla node service ($(cat /opt/burla/burla_source)) ..."
 
         # Node images ship a pre-warmed /opt/burla/.venv; newer uv refuses to
         # overwrite an existing venv unless told to (older uv, as baked into
@@ -589,43 +602,41 @@ class Node:
             worker_memory_kb=$((1024 * 1024))
         fi
 
-        # Swap for memory-pressure parking: prefer zram (compressed RAM) so
-        # parked Python heaps leave resident memory without cloud-disk latency.
-        # Fall back to a disk swapfile when the zram module is missing (needs
-        # linux-modules-extra on cloud kernels). Half of MemTotal keeps
-        # headroom for the compressed store / file itself. Best effort: every
-        # step stays inside an `if` so a swap failure degrades to
+        # Swap for memory-pressure parking: a swapfile the size of RAM (the
+        # root volume is grown by that much in Node.start) with zswap in
+        # front. zswap's compressed pool is charged to the cgroup that owns
+        # the pages and capped at 20% of RAM, so parked memory always counts
+        # against the workers' budget and spills to disk when a running
+        # worker needs the RAM. zram was dropped: its store is kernel memory
+        # outside every cgroup budget, so parking under sustained pressure
+        # over-committed physical RAM and froze whole nodes. Best effort:
+        # every step stays inside an `if` so a swap failure degrades to
         # swap_mode=none (node_service then kills under pressure instead of
         # parking) rather than tripping the ERR trap and deleting the VM.
-        swap_size_kb=$((total_memory_kb / 2))
+        swap_size_kb=$total_memory_kb
         if [ "$swap_size_kb" -lt $((256 * 1024)) ]; then
             swap_size_kb=$((256 * 1024))
         fi
         swap_mode=none
-        if modprobe zram 2>/dev/null && [ -e /dev/zram0 ]; then
-            echo lz4 >/sys/block/zram0/comp_algorithm 2>/dev/null || true
-            if echo $((swap_size_kb * 1024)) >/sys/block/zram0/disksize \\
-                && mkswap /dev/zram0 >/dev/null \\
-                && swapon -p 100 /dev/zram0; then
-                swap_mode=zram
-            fi
+        if ! fallocate -l ${{swap_size_kb}}K /swapfile 2>/dev/null; then
+            dd if=/dev/zero of=/swapfile bs=1M \\
+                count=$((swap_size_kb / 1024)) status=none || rm -f /swapfile
         fi
-        if [ "$swap_mode" = "none" ]; then
-            if ! fallocate -l ${{swap_size_kb}}K /swapfile 2>/dev/null; then
-                dd if=/dev/zero of=/swapfile bs=1M \\
-                    count=$((swap_size_kb / 1024)) status=none || rm -f /swapfile
+        if [ -f /swapfile ] \\
+            && chmod 600 /swapfile \\
+            && mkswap /swapfile >/dev/null \\
+            && swapon -p 100 /swapfile; then
+            swap_mode=swapfile
+            if [ -e /sys/module/zswap/parameters/enabled ]; then
+                modprobe lz4 2>/dev/null || true
+                modprobe zsmalloc 2>/dev/null || true
+                echo lz4 >/sys/module/zswap/parameters/compressor 2>/dev/null || true
+                echo zsmalloc >/sys/module/zswap/parameters/zpool 2>/dev/null || true
+                echo 20 >/sys/module/zswap/parameters/max_pool_percent
+                if echo Y >/sys/module/zswap/parameters/enabled; then
+                    swap_mode=zswap+swapfile
+                fi
             fi
-            if [ -f /swapfile ] \\
-                && chmod 600 /swapfile \\
-                && mkswap /swapfile >/dev/null \\
-                && swapon -p 100 /swapfile; then
-                swap_mode=swapfile
-            fi
-        fi
-        if [ "$swap_mode" != "none" ]; then
-            # Swap readahead off: parked workers fault back scattered pages,
-            # and clustered readahead just multiplies zram/disk traffic.
-            sysctl -w vm.page-cluster=0 >/dev/null
         fi
         report_log "Node swap provisioned: mode=$swap_mode size_kb=$swap_size_kb"
 

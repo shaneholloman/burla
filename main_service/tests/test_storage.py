@@ -1,18 +1,16 @@
 """
 Section 23: /api/sf/* and /signed-* storage endpoints.
+
+The shared filesystem only exists where a bucket is configured; client-hosted
+heads (remote-dev included) have none by default, so these run on local-dev,
+whose nodes bind-mount a local dir under the same config key.
 """
 
 from __future__ import annotations
 
 import pytest
 
-pytestmark = pytest.mark.service
-
-
-@pytest.fixture(autouse=True)
-def _requires_shared_filesystem(main_http_client):
-    settings = main_http_client.get("/v1/settings").json()
-    assert settings.get("filesystemEnabled") is True
+pytestmark = [pytest.mark.service, pytest.mark.local_dev]
 
 
 def test_filemanager_unsupported_action_returns_400_body(main_http_client, local_dev_cluster):

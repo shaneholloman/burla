@@ -62,12 +62,17 @@ MIDDLE
 FRPS_EOF
 docker network create burla-relay || true
 docker rm -f burla-relay-auth burla-relay-frps || true
+# Rotated but long retention: relay logs are the only record of tunnel
+# registrations and routing failures (e.g. a 502 answering a node request),
+# and docker's default json-file driver keeps one unbounded file.
 docker run -d --restart=always --network=burla-relay --name=burla-relay-auth \\
+    --log-opt max-size=100m --log-opt max-file=10 \\
     -v /etc/burla-relay/auth_plugin.py:/app/auth_plugin.py:ro \\
     -e BURLA_BACKEND_URL="$BACKEND_URL" \\
     -w /app python:3.13-slim bash -c \\
     "pip install --quiet fastapi uvicorn requests && uvicorn auth_plugin:app --host 0.0.0.0 --port 9000"
 docker run -d --restart=always --network=burla-relay --name=burla-relay-frps \\
+    --log-opt max-size=100m --log-opt max-file=10 \\
     -p 443:443 -p 7000:7000 \\
     -v /etc/burla-relay/frps.toml:/etc/frp/frps.toml:ro \\
     -e FRP_SUBDOMAIN_HOST="$SUBDOMAIN_HOST" \\

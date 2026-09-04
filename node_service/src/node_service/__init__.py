@@ -19,7 +19,7 @@ from fastapi.responses import Response
 from starlette.datastructures import UploadFile
 from starlette.requests import ClientDisconnect
 
-__version__ = "1.7.12"
+__version__ = "1.8.0"
 PROJECT_ID = os.environ["PROJECT_ID"]
 BURLA_BACKEND_URL = os.environ.get(
     "BURLA_BACKEND_URL", "https://backend.burla.dev"
@@ -92,6 +92,9 @@ def REINIT_SELF(SELF):
     SELF["slot_trades_granted"] = {}
     SELF["slot_trade_id"] = None
     SELF["last_slot_trade_attempt_at"] = 0.0
+    # Slots the head's mint controller rolled back (see push_state); idle
+    # workers retire against this immediately, busy ones as they finish.
+    SELF["shed_slots_pending"] = 0
     SELF["job_assigned_at"] = 0.0
     SELF["job_watcher_stop_event"] = Event()
     SELF[
@@ -107,11 +110,27 @@ def REINIT_SELF(SELF):
     SELF["all_inputs_uploaded"] = False
     SELF["dynamic_func_ram"] = False
     SELF["dynamic_func_cpu"] = False
+    # Measured swap round-trip speed (see calibrate_swap_rate); None means
+    # park without weighing a kill.
+    SELF["swap_bytes_per_sec"] = None
+    # Smoothed peak RSS of finished attempts: what one more worker will cost
+    # (see _another_worker_fits). None until an attempt has finished.
+    SELF["typical_attempt_peak_rss_bytes"] = None
     SELF["dynamic_retire_lock"] = asyncio.Lock()
     SELF["dynamic_ram_monitor_task"] = None
     SELF["cpu_pressure_monitor_task"] = None
     SELF["worker_readd_task"] = None
     SELF["last_pressure_retirement_at"] = 0.0
+    # Last memory-pressure kill or park; the re-add loop slows down after one.
+    SELF["last_memory_shed_at"] = 0.0
+    # Wall times of recent worker parks (CPU or memory). The recovery dwell,
+    # mint refractory, and mint batch halving all key off "how recently and
+    # how often did this node park" (see worker_client.py).
+    SELF["park_event_times"] = []
+    # Last time the recovery loop's smoothed add-gates read green; None until
+    # they have. The replacement requester reads "never green since the
+    # deficit began" as this machine genuinely unable to host its slots.
+    SELF["readd_gates_last_green_at"] = None
     # The job's pickled function, kept so workers booted mid-job (re-adds,
     # slot trades) can be assigned without the client.
     SELF["function_pkl"] = None
@@ -119,6 +138,10 @@ def REINIT_SELF(SELF):
     SELF["num_results_received"] = 0
     SELF["pending_transfers"] = {}
     SELF["input_transfer_lock"] = asyncio.Lock()
+    # A node must not declare its job part drained while its steal GET/ACK
+    # transaction is still in flight: the donor has already removed those
+    # inputs and needs the ACK before either side may leave the job.
+    SELF["active_input_steal_id"] = None
     SELF["pending_result_batch"] = None
     SELF["pending_logs"] = deque(maxlen=MAX_PENDING_LOGS)
     SELF["pending_cluster_shutdown"] = False
@@ -597,6 +620,13 @@ async def lifespan(app: FastAPI):
 
     asyncio.create_task(_state_push_loop(logger=logger))
     resource_metrics_task = asyncio.create_task(resource_metrics_loop())
+
+    # Only real VMs behind the relay have frpc/caddy to snapshot; local-dev
+    # fake VMs have neither systemd nor a tunnel.
+    if not IN_LOCAL_DEV_MODE and Path("/etc/burla/frpc.toml").exists():
+        from node_service.helpers import relay_proxy_diagnostics_loop
+
+        asyncio.create_task(relay_proxy_diagnostics_loop())
 
     # boot containers before accepting any requests.
     # `reboot_containers` will ask the head to delete this VM if it fails, no need to do that here.

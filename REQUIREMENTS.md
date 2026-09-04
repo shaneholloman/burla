@@ -29,10 +29,10 @@ node boot failures in the head log.
 ## R2. Remote development cluster
 
 Running `make remote-dev` serves the head from the working tree while nodes are real
-cloud VMs, and `remote_parallel_map` against it returns correct results. Nodes run the
-current branch as pushed to GitHub.
+cloud VMs, and `remote_parallel_map` against it returns correct results. Nodes
+download the working tree from the head at boot, uncommitted edits included.
 
-Verify: push the branch, `make remote-dev`, press Start, run an `rpm` job. Results
+Verify: `make remote-dev` with nothing pushed, press Start, run an `rpm` job. Results
 correct, and the booted VMs appear in the cloud console under this cluster.
 
 ## R3. Zero-setup job

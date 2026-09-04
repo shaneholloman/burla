@@ -828,6 +828,21 @@ def _settings_usage_parsers(root):
         metavar="N",
         help="Delete idle nodes after this many seconds (default: 600).",
     )
+    update.add_argument(
+        "--max-vcpus",
+        type=int,
+        metavar="N",
+        help="Global ceiling on vCPUs across all CPU nodes; grow never exceeds it.",
+    )
+    update.add_argument(
+        "--max-gpus",
+        action="append",
+        metavar="MODEL=N",
+        help=(
+            "Global ceiling on GPUs of one model, e.g. --max-gpus A100=8. "
+            "Repeatable; models not mentioned keep their current cap."
+        ),
+    )
     update.set_defaults(handler=_settings_update, command_name="settings.update")
 
     usage = root.add_parser(
@@ -1330,6 +1345,21 @@ def _call_metrics(args):
     return client.request("GET", path)
 
 
+def _parse_max_gpus(entries):
+    if not entries:
+        return None
+    max_gpus = {}
+    for entry in entries:
+        model, sep, count = entry.partition("=")
+        if not sep or not model or not count.isdigit():
+            raise ManagementError(
+                "INVALID_ARGUMENT",
+                f"--max-gpus expects MODEL=N (e.g. A100=8), got {entry!r}.",
+            )
+        max_gpus[model] = int(count)
+    return max_gpus
+
+
 def _settings_update(args):
     _, client = _client(args)
     body = _compact(
@@ -1340,6 +1370,8 @@ def _settings_update(args):
             "region": args.region,
             "disk_gb": args.disk_gb,
             "inactivity_timeout_seconds": args.inactivity_timeout_seconds,
+            "max_vcpus": args.max_vcpus,
+            "max_gpus": _parse_max_gpus(args.max_gpus),
         }
     )
     if not body:

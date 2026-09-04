@@ -28,9 +28,8 @@ from jinja2 import Environment, FileSystemLoader
 from starlette.datastructures import UploadFile
 from starlette.middleware.sessions import SessionMiddleware
 
-CURRENT_BURLA_VERSION = "1.7.12"
+CURRENT_BURLA_VERSION = "1.8.0"
 MIN_COMPATIBLE_CLIENT_VERSION = "1.7.11"
-NODE_SOURCE_REF = os.environ.get("BURLA_NODE_SOURCE_REF", CURRENT_BURLA_VERSION)
 
 # In this mode EVERYTHING runs locally in docker containers.
 # possible modes: local-dev-mode (everything local), remote-dev-mode (only main-service local), prod
@@ -210,6 +209,26 @@ def default_region() -> str:
     return "us-central1"
 
 
+from main_service.providers.catalog import gpu_models
+
+# Global grow ceilings, total fleet resources counting nodes already up.
+# 2560 preserves the old hardcoded MAX_GROW_CPUS; GPU growth was accidentally
+# uncapped before these settings existed, so models get a deliberate default.
+DEFAULT_MAX_VCPUS = 2560
+DEFAULT_MAX_GPUS_PER_MODEL = 8
+
+
+def resource_caps(config: dict) -> tuple[int, dict]:
+    """(max vCPUs, {gpu_model: max gpus}) with defaults filled in, so configs
+    saved before these settings existed keep the old behavior."""
+    configured = config.get("max_gpus", {})
+    max_gpus = {
+        model: configured.get(model, DEFAULT_MAX_GPUS_PER_MODEL)
+        for model in gpu_models(CLOUD_PROVIDER)
+    }
+    return config.get("max_vcpus", DEFAULT_MAX_VCPUS), max_gpus
+
+
 DEFAULT_CONFIG = {  # <- config used only when no config has ever been saved
     "Nodes": [
         {
@@ -225,6 +244,10 @@ DEFAULT_CONFIG = {  # <- config used only when no config has ever been saved
         }
     ],
     "gcs_bucket_name": _default_shared_workspace_bucket(),
+    "max_vcpus": DEFAULT_MAX_VCPUS,
+    "max_gpus": {
+        model: DEFAULT_MAX_GPUS_PER_MODEL for model in gpu_models(CLOUD_PROVIDER)
+    },
 }
 
 from main_service import history
@@ -262,7 +285,7 @@ if IN_LOCAL_DEV_MODE:
         os.environ.get("LOCAL_DEV_NODE_QUANTITY", 1)
     )
 
-from main_service import cluster_state
+from main_service import cluster_state, mint_controller
 from main_service.helpers import (
     ChattyClientEndpointFilter,
     Logger,
@@ -432,6 +455,7 @@ async def lifespan(app: FastAPI):
     node_reaper_task = asyncio.create_task(
         cluster_state.node_reaper_loop(logger=Logger())
     )
+    mint_controller_task = asyncio.create_task(mint_controller.controller_loop())
     # Client-hosted dashboards are localhost-only; there is no public DNS
     # lease to renew.
     run_lease_loop = not IN_LOCAL_DEV_MODE and not IN_CLIENT_HOSTED_MODE
@@ -463,6 +487,7 @@ async def lifespan(app: FastAPI):
     finally:
         reaper_task.cancel()
         node_reaper_task.cancel()
+        mint_controller_task.cancel()
         if dashboard_lease_task is not None:
             dashboard_lease_task.cancel()
         if stopped_instance_reaper_task is not None:

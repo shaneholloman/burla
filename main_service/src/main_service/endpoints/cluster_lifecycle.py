@@ -31,7 +31,8 @@ from main_service import (
 )
 
 router = APIRouter()
-MAX_GROW_CPUS = 2560
+# Local-dev grow ceiling: overrides the user-set max_vcpus because local
+# nodes are containers on one laptop, not real VMs.
 LOCAL_DEV_MAX_GROW_CPUS = 4
 
 # Nodes booted by the grow path always get a short inactivity timeout

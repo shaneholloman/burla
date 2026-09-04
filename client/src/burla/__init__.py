@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 from platformdirs import user_config_dir
 
 # needed so main_service can associate a client version with a request
-__version__ = "1.7.12"
+__version__ = "1.8.0"
 
 # In a checkout this file is <root>/client/src/burla/__init__.py. Installed
 # flat (e.g. /worker_service_python_env/burla/ on nodes) there is no parents[3],
@@ -42,7 +42,6 @@ _DEFAULT_RELAY_HOST = (
     if _BURLA_ENVIRONMENT == "test"
     else "relay.burla.dev"
 )
-_DEFAULT_NODE_SOURCE_REF = "dev" if _BURLA_ENVIRONMENT == "test" else __version__
 _BURLA_BACKEND_URL = os.environ.get(
     "BURLA_BACKEND_URL", _DEFAULT_BACKEND_URL
 ).rstrip("/")
@@ -54,9 +53,6 @@ if _BURLA_BACKEND_URL != "https://backend.burla.dev" and not (
         "source checkout."
     )
 _BURLA_RELAY_HOST = os.environ.get("BURLA_RELAY_HOST", _DEFAULT_RELAY_HOST)
-_BURLA_NODE_SOURCE_REF = os.environ.get(
-    "BURLA_NODE_SOURCE_REF", _DEFAULT_NODE_SOURCE_REF
-)
 
 _appdata_dir = Path(user_config_dir(appname=_BURLA_APP_NAME, appauthor="burla"))
 CONFIG_PATH = _appdata_dir / Path("burla_credentials.json")

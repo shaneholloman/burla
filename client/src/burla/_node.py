@@ -27,6 +27,11 @@ MAX_INPUT_SIZE_BYTES = 1_000_000 * 200  # 200MB
 MAX_CHUNK_SIZE_BYTES = 1_000_000 * 2  # 2MB
 NETWORK_RETRY_ATTEMPTS = 5
 NETWORK_RETRY_DELAY_SECONDS = 1
+# Assignment-time gateway errors (relay route not wired yet) clear in
+# seconds when they clear at all; sized to outlast a fleet boot's
+# registration burst without stalling the job start noticeably.
+ASSIGN_GATEWAY_RETRY_ATTEMPTS = 5
+ASSIGN_GATEWAY_RETRY_DELAY_SECONDS = 2
 NETWORK_ERROR_TYPES = (
     asyncio.TimeoutError,
     ClientConnectorError,
@@ -34,6 +39,15 @@ NETWORK_ERROR_TYPES = (
     ClientError,
     OSError,
 )
+
+
+class _AssignmentGatewayError(Exception):
+    """A 502/504 answering a job assignment: the relay layer failed the hop,
+    node_service never saw the request."""
+
+    def __init__(self, status: int):
+        self.status = status
+        super().__init__(str(status))
 
 # Gaps longer than this between loop iterations mean the client process was
 # suspended (laptop sleep, SIGSTOP), not that the nodes went silent.
@@ -192,7 +206,7 @@ async def _post_with_retries(session, url, headers, data, max_retries=5):
         try:
             async with session.post(url, data=data, headers=headers) as response:
                 return response.status, await response.text()
-        except aiohttp.client_exceptions.ServerDisconnectedError:
+        except NETWORK_ERROR_TYPES:
             if attempt_index == max_retries - 1:
                 raise
             await asyncio.sleep(0.5)
@@ -535,39 +549,59 @@ class Node:
                     )
                     self.spinner_compatible_print(msg)
                     return
+                elif response.status in (502, 504):
+                    raise _AssignmentGatewayError(response.status)
                 else:
-                    if self.late_join:
-                        # A replacement node holds no inputs until assigned,
-                        # so a botched assignment loses nothing; dropping it
-                        # must not kill a job that was running fine without
-                        # it (observed: a 500 from a fresh node's assignment
-                        # failing the whole job).
-                        self.state = "REMOVED"
-                        self.removed_reason = f"assignment failed: {response.status}"
-                        msg = (
-                            f"Replacement node {self.instance_name} failed "
-                            f"assignment ({response.status}), removed from job."
-                        )
-                        self.spinner_compatible_print(msg)
-                        return
-                    msg = f"Failed to assign {self.instance_name}: {response.status}"
-                    raise Exception(msg)
+                    # No node has been assigned anything yet at this point,
+                    # so dropping one loses nothing; a botched assignment
+                    # must not kill a job the rest of the fleet can run
+                    # (observed: one relay 502 out of 40 healthy nodes
+                    # failing whole 2,048-vCPU benchmark runs).
+                    self.state = "REMOVED"
+                    self.removed_reason = f"assignment failed: {response.status}"
+                    msg = (
+                        f"Node {self.instance_name} failed assignment "
+                        f"({response.status}), removed from job."
+                    )
+                    self.spinner_compatible_print(msg)
+                    return
 
+        gateway_attempts = 0
         while True:
             try:
                 return await _run_network_request_with_retries(
                     request_function, max_retries=2
                 )
+            except _AssignmentGatewayError as error:
+                # A gateway status comes from the relay layer, never from
+                # node_service (whose own refusals are 409/503), so the
+                # assignment cannot have landed and a retry cannot
+                # double-assign. Fleet boots register ~40 tunnel routes at
+                # once, and the relay has been observed briefly 502ing a
+                # just-READY node's route.
+                gateway_attempts += 1
+                if gateway_attempts < ASSIGN_GATEWAY_RETRY_ATTEMPTS:
+                    await asyncio.sleep(ASSIGN_GATEWAY_RETRY_DELAY_SECONDS)
+                    continue
+                self.state = "REMOVED"
+                self.removed_reason = (
+                    f"assignment failed: {error.status} from the relay "
+                    f"after {gateway_attempts} attempts"
+                )
+                self.spinner_compatible_print(
+                    f"Node {self.instance_name} was unreachable through the "
+                    f"relay while assigning ({error.status}), removed from job."
+                )
+                return
             except NETWORK_ERROR_TYPES:
                 if self._node_silence_timeout_exceeded():
                     await self._fail_and_delete(
                         self._node_silence_timeout_message("assigning job")
                     )
-                    if self.late_join:
-                        # VM cleanup already requested; the job continues
-                        # without this opportunistic extra.
-                        self.state = "REMOVED"
-                        self.removed_reason = "unreachable while assigning job"
+                    # VM cleanup already requested; the job continues
+                    # without this node (it was assigned nothing).
+                    self.state = "REMOVED"
+                    self.removed_reason = "unreachable while assigning job"
                     return
 
     async def _gather_results(self):

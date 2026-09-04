@@ -15,6 +15,7 @@ from main_service import CLOUD_PROVIDER, IN_LOCAL_DEV_MODE
 from main_service.providers.catalog import (
     gpu_machine_type,
     is_packable_cpu_machine,
+    machine_spec,
     machine_type_cpu_count,
     pack_cpu_machines,
     parallelism_capacity,
@@ -35,21 +36,55 @@ def plan_grow_nodes(
     func_gpu: Optional[str],
     config: dict,
     max_additional_cpus: Optional[int] = None,
+    max_additional_gpus: Optional[int] = None,
+    slots_per_node: Optional[int] = None,
+    machine_type: Optional[str] = None,
 ) -> list[dict]:
     """Plan machines covering `missing_slots` more parallelism.
 
     Returns one `{"instance_name", "machine_type", "target_parallelism"}` per
     node to boot; empty when nothing can be booted. `max_additional_cpus`
-    (None = uncapped) bounds CPU jobs only; GPU jobs are sized purely by
-    slots, matching job-start growth.
+    (None = uncapped) bounds CPU jobs; `max_additional_gpus` bounds GPU jobs.
+    `slots_per_node` with `machine_type` plans by measured capacity instead:
+    a node that shed to N workers under memory pressure knows N is what one
+    such machine sustains, so replacements are that machine type with N slots
+    each rather than a full CPU count of workers that would shed again.
     """
     gpu_mt = gpu_machine_type(func_gpu, CLOUD_PROVIDER)
 
+    if slots_per_node:
+        n_nodes = math.ceil(missing_slots / slots_per_node)
+        if max_additional_cpus is not None:
+            n_nodes = min(
+                n_nodes, max(0, max_additional_cpus) // machine_type_cpu_count(machine_type)
+            )
+        planned = []
+        remaining_parallelism = missing_slots
+        for nodes_left in range(n_nodes, 0, -1):
+            # Spread evenly: 49 slots at 15 per node is 13/12/12/12, not
+            # 15/15/15/4 (observed: the 4-slot node idled at ~10% RAM).
+            node_parallelism = math.ceil(remaining_parallelism / nodes_left)
+            planned.append(
+                {
+                    "instance_name": f"burla-node-{uuid4().hex[:8]}",
+                    "machine_type": machine_type,
+                    "target_parallelism": node_parallelism,
+                }
+            )
+            remaining_parallelism -= node_parallelism
+        return planned
+
     if gpu_mt:
+        # One function call per GPU, so slots-per-node equals gpus-per-node
+        # and the per-model GPU budget bounds node count directly.
         gpu_slots_per_node = parallelism_capacity(gpu_mt, func_cpu, func_ram)
         n_nodes = math.ceil(missing_slots / gpu_slots_per_node)
+        if max_additional_gpus is not None:
+            n_nodes = min(n_nodes, max(0, max_additional_gpus) // gpu_slots_per_node)
+        if n_nodes <= 0:
+            return []
         node_machine_types = [gpu_mt] * n_nodes
-        parallelism_to_add = missing_slots
+        parallelism_to_add = min(missing_slots, n_nodes * gpu_slots_per_node)
     else:
         cpus_per_call = required_cpus_per_call(func_cpu, func_ram)
         num_cpus_to_add = missing_slots * cpus_per_call
@@ -111,3 +146,7 @@ def plan_grow_nodes(
 
 def planned_cpu_count(planned: list[dict]) -> int:
     return sum(machine_type_cpu_count(p["machine_type"]) for p in planned)
+
+
+def planned_gpu_count(planned: list[dict]) -> int:
+    return sum(machine_spec(p["machine_type"])["gpus"] for p in planned)

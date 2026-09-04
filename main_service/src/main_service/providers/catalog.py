@@ -326,17 +326,40 @@ GPU_MACHINE_TYPES = {
 }
 
 
+# Machine-type-prefix -> (GPU model, VRAM). p4de must precede p4d so the
+# longest prefix wins when matching.
+_GPU_FAMILIES = {
+    "a2-highgpu": ("A100", "40G"),
+    "a2-ultragpu": ("A100", "80G"),
+    "a3-highgpu": ("H100", "80G"),
+    "g4dn.": ("T4", "16G"),
+    "p4de.": ("A100", "80G"),
+    "p4d.": ("A100", "40G"),
+    "p5.": ("H100", "80G"),
+}
+
+
+def gpu_model(machine_type: str) -> str | None:
+    """The GPU model (e.g. "A100") in a machine type, ignoring VRAM size.
+    Per-model caps deliberately pool VRAM variants under one model name."""
+    for prefix, (model, _) in _GPU_FAMILIES.items():
+        if machine_type.startswith(prefix):
+            return model
+    return None
+
+
+def gpu_models(cloud_provider: str) -> list[str]:
+    """Distinct GPU models bootable on this cloud, in stable order."""
+    models = []
+    for machine_type in GPU_MACHINE_TYPES[cloud_provider].values():
+        model = gpu_model(machine_type)
+        if model not in models:
+            models.append(model)
+    return models
+
+
 def gpu_display(machine_type: str) -> str | None:
-    families = {
-        "a2-highgpu": ("A100", "40G"),
-        "a2-ultragpu": ("A100", "80G"),
-        "a3-highgpu": ("H100", "80G"),
-        "g4dn.": ("T4", "16G"),
-        "p4d.": ("A100", "40G"),
-        "p4de.": ("A100", "80G"),
-        "p5.": ("H100", "80G"),
-    }
-    for prefix, (model, memory) in families.items():
+    for prefix, (model, memory) in _GPU_FAMILIES.items():
         if machine_type.startswith(prefix):
             count = machine_spec(machine_type)["gpus"]
             return f"{count}x {model} {memory}"
@@ -494,10 +517,13 @@ def settings_options(cloud_provider: str) -> dict:
         "machine_types": machines,
         "regions": list(SETTINGS_REGIONS[cloud_provider]),
         "cpu_only_image_repositories": list(CPU_ONLY_IMAGE_REPOSITORIES),
+        "gpu_models": gpu_models(cloud_provider),
         "constraints": {
             "quantity": {"minimum": 1, "maximum": 1000},
             "disk_gb": {"minimum": 10, "maximum": 2000},
             "inactivity_timeout_seconds": {"minimum": 0, "maximum": 86400},
+            "max_vcpus": {"minimum": 0, "maximum": 100_000},
+            "max_gpus": {"minimum": 0, "maximum": 10_000},
         },
     }
 

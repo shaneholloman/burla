@@ -51,9 +51,9 @@ class FixedCpuSampler:
         return self.utilization
 
 
-class NoIoPressure:
+class NoAddGatePressure:
     def sample(self):
-        return 0.0, 0.0
+        return 0.0, 0.0, 0.0  # io stall, network utilization, memory stall
 
 
 class FakeWorker:
@@ -65,6 +65,10 @@ class FakeWorker:
         self.is_idle = False
         self.current_input = (index, b"input")
         self._cpu_percent = cpu_percent
+        # An impossible pid (above any real pid_max) so the stall tracker's
+        # /proc read raises OSError and skips this fake, exactly as it skips
+        # a real worker mid-relaunch.
+        self.worker_host_pid = 10_000_000 + index
 
     def cpu_percent(self):
         return self._cpu_percent
@@ -192,7 +196,7 @@ async def test_recovery_restores_parked_worker_when_cores_idle(
         worker_client.SELF["dynamic_func_cpu"] = False
 
     monkeypatch.setattr(worker_client, "SliceCpuSampler", lambda: FixedCpuSampler(0.30))
-    monkeypatch.setattr(worker_client, "AddGateSampler", NoIoPressure)
+    monkeypatch.setattr(worker_client, "AddGateSampler", NoAddGatePressure)
     monkeypatch.setattr(worker_client.asyncio, "sleep", fake_sleep)
     monkeypatch.setattr(
         worker_client, "_unthrottle_one_parked_worker", capture_recovery
@@ -206,7 +210,8 @@ async def test_recovery_restores_parked_worker_when_cores_idle(
 
 @pytest.mark.asyncio
 async def test_recovery_holds_while_cores_busy(monkeypatch, dynamic_state):
-    """No recovery inside the hold band: the node is already near-full."""
+    """No recovery above the utilization add-ceiling: cores are saturated
+    enough that another runner would only add contention."""
     worker_client.SELF["workers"] = [FakeWorker(0, throttled=True)]
     worker_client.SELF["dynamic_func_cpu"] = True
     recovery_calls = []
@@ -214,8 +219,8 @@ async def test_recovery_holds_while_cores_busy(monkeypatch, dynamic_state):
     async def capture_recovery(reason, via):
         recovery_calls.append((reason, via))
 
-    monkeypatch.setattr(worker_client, "SliceCpuSampler", lambda: FixedCpuSampler(0.92))
-    monkeypatch.setattr(worker_client, "AddGateSampler", NoIoPressure)
+    monkeypatch.setattr(worker_client, "SliceCpuSampler", lambda: FixedCpuSampler(0.98))
+    monkeypatch.setattr(worker_client, "AddGateSampler", NoAddGatePressure)
     monkeypatch.setattr(
         worker_client.asyncio, "sleep", _two_tick_sleep("dynamic_func_cpu")
     )
@@ -245,7 +250,7 @@ async def test_memory_parked_worker_recovers_when_cores_idle(
         worker_client.SELF["dynamic_func_ram"] = False
 
     monkeypatch.setattr(worker_client, "SliceCpuSampler", lambda: FixedCpuSampler(0.30))
-    monkeypatch.setattr(worker_client, "AddGateSampler", NoIoPressure)
+    monkeypatch.setattr(worker_client, "AddGateSampler", NoAddGatePressure)
     monkeypatch.setattr(worker_client.asyncio, "sleep", fake_sleep)
     monkeypatch.setattr(
         worker_client, "_unthrottle_one_parked_worker", capture_recovery
@@ -255,3 +260,4 @@ async def test_memory_parked_worker_recovers_when_cores_idle(
 
     assert sleep_intervals == [1]
     assert recovery_calls == [("cores are idle", "recovery_loop")]
+

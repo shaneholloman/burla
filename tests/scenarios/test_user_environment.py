@@ -22,6 +22,7 @@ pytestmark = [pytest.mark.e2e, pytest.mark.slow]
 CUSTOM_IMAGE = "python:3.12-slim"
 
 
+@pytest.mark.local_dev
 def test_package_install_custom_image_and_shared_filesystem(
     rpm_subprocess, local_dev_cluster, main_http_client
 ):

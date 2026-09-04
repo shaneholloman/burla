@@ -36,7 +36,6 @@ from filelock import FileLock
 
 from burla import (
     _BURLA_BACKEND_URL,
-    _BURLA_NODE_SOURCE_REF,
     _BURLA_RELAY_HOST,
     __version__,
 )
@@ -652,7 +651,6 @@ def run_local_head_for_dashboard(
 def _run_local_head(
     detached: bool,
     on_ready: Callable[[str, bool], None] | None = None,
-    node_source_ref: str | None = None,
     reload_dir: str | None = None,
     namespace: str = "",
     preferred_port: int = PREFERRED_HEAD_PORT,
@@ -721,7 +719,6 @@ def _run_local_head(
         "BURLA_RELAY_SERVER_ADDR": RELAY_SERVER_ADDR,
         "BURLA_RELAY_SERVER_PORT": str(RELAY_SERVER_PORT),
         "BURLA_RELAY_TRANSPORT_PROTOCOL": RELAY_TRANSPORT_PROTOCOL,
-        "BURLA_NODE_SOURCE_REF": node_source_ref or _BURLA_NODE_SOURCE_REF,
         "MAIN_SERVICE_URL_FOR_NODES": f"https://{subdomain}.{RELAY_HOST}",
         "PORT": str(head_port),
         "INTERNAL_TLS_PORT": str(tls_port),
@@ -821,50 +818,23 @@ def _run_local_head(
     return url
 
 
-def _current_branch(repo_root: Path) -> str:
-    result = subprocess.run(
-        ["git", "-C", str(repo_root), "branch", "--show-current"],
+def _working_tree_stamp(repo_root: Path) -> str:
+    """Matches the stamp main_service serves inside the node-source tarball
+    (see main_service/node_source.py)."""
+    sha = subprocess.run(
+        ["git", "-C", str(repo_root), "rev-parse", "--short", "HEAD"],
         capture_output=True,
         text=True,
-    )
-    branch = result.stdout.strip()
-    if not branch:
-        raise LocalHeadError(
-            "remote-dev needs a checked-out branch, but this repo is on a detached HEAD."
-        )
-    return branch
-
-
-def _warn_if_branch_unpushed(repo_root: Path, branch: str):
-    """Node VMs git-fetch this branch from GitHub, so anything not pushed (every
-    uncommitted edit included) never reaches them."""
-    on_origin = subprocess.run(
-        ["git", "-C", str(repo_root), "rev-parse", "--verify", f"origin/{branch}"],
-        capture_output=True,
-        text=True,
-    )
-    if on_origin.returncode != 0:
-        print(
-            f"WARNING: branch `{branch}` is not on origin yet, so nodes cannot "
-            f"fetch it. Push it before booting nodes.",
-            flush=True,
-        )
-        return
-    unpushed = subprocess.run(
+    ).stdout.strip()
+    dirty = subprocess.run(
         [
-            *("git", "-C", str(repo_root)),
-            *("rev-list", "--count", f"origin/{branch}..{branch}"),
+            *("git", "-C", str(repo_root), "status", "--porcelain"),
+            *("--", "node_service", "client", "main_service"),
         ],
         capture_output=True,
         text=True,
-    )
-    count = unpushed.stdout.strip()
-    if count and count != "0":
-        print(
-            f"WARNING: {count} commit(s) on `{branch}` are not pushed. Nodes will "
-            f"run the pushed version, not your working tree.",
-            flush=True,
-        )
+    ).stdout.strip()
+    return f"{sha}+uncommitted" if dirty else sha
 
 
 def run_local_dev_head() -> None:
@@ -923,24 +893,21 @@ def run_local_dev_head() -> None:
 
 def run_remote_dev_head() -> None:
     """`make remote-dev`: run this checkout's main_service here, hot-reloading on
-    save, while nodes boot as real cloud VMs running this checkout's branch."""
+    save, while nodes boot as real cloud VMs that download this working tree
+    from the head at boot (uncommitted edits included, nothing to push)."""
     from burla import _IN_SOURCE_CHECKOUT, _SOURCE_ROOT
 
     if not _IN_SOURCE_CHECKOUT:
         raise LocalHeadError("remote-dev requires an editable Burla source checkout.")
 
-    # Nodes git-fetch their code from GitHub, so the ref has to exist there.
-    # Defaults to this checkout's branch; override to pin nodes at an already
-    # pushed ref (e.g. `dev`) while iterating on head-only changes.
-    branch = os.environ.get("BURLA_NODE_SOURCE_REF") or _current_branch(_SOURCE_ROOT)
-    _warn_if_branch_unpushed(_SOURCE_ROOT, branch)
+    stamp = _working_tree_stamp(_SOURCE_ROOT)
     namespace = cluster_namespace()
 
     def announce(url: str, is_foreground: bool):
         lines = [
             f"\nBurla remote-dev cluster [{namespace or 'default'}]",
             f"  dashboard: {url}",
-            f"  node code: branch `{branch}` on GitHub",
+            f"  node code: this working tree ({stamp})",
         ]
         if is_foreground:
             lines.append("  Press Ctrl-C to stop it.\n")
@@ -953,7 +920,6 @@ def run_remote_dev_head() -> None:
     _run_local_head(
         detached=False,
         on_ready=announce,
-        node_source_ref=branch,
         reload_dir=str(_SOURCE_ROOT / "main_service" / "src"),
         namespace=namespace,
         preferred_port=preferred_port,

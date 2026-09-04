@@ -126,8 +126,9 @@ blocked. Notable exceptions:
    that destroys other agents' clusters. Stop the dev-cluster process normally.
    (Workers live inside their node's own docker daemon and die with it.)
 2. Prefer `local-dev` while iterating: node and worker code is bind-mounted, so
-   your edits apply on save. In `remote-dev`, node VMs run your branch from
-   GitHub, so `node_service` / `worker_server.py` changes need a push first.
+   your edits apply on save. In `remote-dev`, node VMs download this working
+   tree from the head at boot (uncommitted edits included), so `node_service` /
+   `worker_server.py` changes only reach nodes booted after the edit.
 3. Keep local clusters small. They default to 1 node; raise with
    `LOCAL_DEV_NODE_QUANTITY` only when a test needs multiple nodes.
 

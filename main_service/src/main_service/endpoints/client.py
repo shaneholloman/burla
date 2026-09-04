@@ -30,6 +30,7 @@ from main_service import (
     get_add_background_task_function,
     get_auth_headers,
     get_logger,
+    resource_caps,
 )
 from main_service import cluster_state, history
 from main_service.helpers import Logger, parse_version
@@ -38,17 +39,18 @@ from main_service.transport_tls import cluster_ca_pem
 from main_service.providers.catalog import (
     gpu_machine_prefix,
     gpu_machine_type,
+    gpu_model,
     parallelism_capacity,
 )
 from main_service.scaling import (
     plan_grow_nodes,
     planned_cpu_count,
+    planned_gpu_count,
     required_cpus_per_call,
 )
 from main_service.endpoints.cluster_lifecycle import (
     GROW_INACTIVITY_SHUTDOWN_TIME_SEC,
     LOCAL_DEV_MAX_GROW_CPUS,
-    MAX_GROW_CPUS,
     _get_cluster_config,
     _start_nodes,
     config_with_job_overrides,
@@ -190,23 +192,33 @@ def _plan_grow_if_needed(
     func_gpu: Optional[str],
     region: Optional[str],
     disk_gb: Optional[int],
-) -> tuple[list[dict], Optional[int], Optional[dict]]:
-    """Returns `(planned_nodes, grow_cpus_remaining, config)`.
+) -> tuple[list[dict], Optional[int], Optional[int], Optional[dict]]:
+    """Returns `(planned_nodes, grow_cpus_remaining, grow_gpus_remaining,
+    config)`.
 
     When `func_gpu` is set, each new node is one of the mapped GPU machine
-    types.
+    types. Budgets are the user-set global ceilings minus resources already
+    live in the fleet, so growth (here and in mid-job replacements) can never
+    push the fleet past `max_vcpus` / the model's `max_gpus`.
     """
-    if gpu_machine_type(func_gpu, CLOUD_PROVIDER):
+    max_vcpus, max_gpus = resource_caps(_get_cluster_config())
+    if IN_LOCAL_DEV_MODE:
+        max_vcpus = LOCAL_DEV_MAX_GROW_CPUS
+    fleet_cpu_vcpus, fleet_gpus = cluster_state.fleet_resources()
+
+    gpu_mt = gpu_machine_type(func_gpu, CLOUD_PROVIDER)
+    if gpu_mt:
+        model = gpu_model(gpu_mt)
         max_additional_cpus = None
+        max_additional_gpus = max(0, max_gpus[model] - fleet_gpus.get(model, 0))
     else:
-        max_cpu = LOCAL_DEV_MAX_GROW_CPUS if IN_LOCAL_DEV_MODE else MAX_GROW_CPUS
-        current_cpus = target_parallelism * required_cpus_per_call(func_cpu, func_ram)
-        max_additional_cpus = max(0, max_cpu - current_cpus)
+        max_additional_cpus = max(0, max_vcpus - fleet_cpu_vcpus)
+        max_additional_gpus = None
 
     requested_parallelism = min(n_inputs, max_parallelism)
     missing_slots = max(0, requested_parallelism - target_parallelism)
     if missing_slots <= 0:
-        return [], max_additional_cpus, None
+        return [], max_additional_cpus, max_additional_gpus, None
 
     config = config_with_job_overrides(_get_cluster_config(), region, disk_gb)
     planned = plan_grow_nodes(
@@ -216,12 +228,15 @@ def _plan_grow_if_needed(
         func_gpu=func_gpu,
         config=config,
         max_additional_cpus=max_additional_cpus,
+        max_additional_gpus=max_additional_gpus,
     )
     if not planned:
-        return [], max_additional_cpus, config
+        return [], max_additional_cpus, max_additional_gpus, config
     if max_additional_cpus is not None:
         max_additional_cpus = max(0, max_additional_cpus - planned_cpu_count(planned))
-    return planned, max_additional_cpus, config
+    if max_additional_gpus is not None:
+        max_additional_gpus = max(0, max_additional_gpus - planned_gpu_count(planned))
+    return planned, max_additional_cpus, max_additional_gpus, config
 
 
 @router.post("/v1/jobs/{job_id}/start")
@@ -396,20 +411,23 @@ async def start_job(
     planned_nodes: list[dict] = []
     grow_config: Optional[dict] = None
     grow_cpus_remaining: Optional[int] = None
+    grow_gpus_remaining: Optional[int] = None
     if grow:
         if min(n_inputs, max_parallelism) > target_parallelism:
             # In a thread because the verification request arrives back
             # through this same event loop.
             await asyncio.to_thread(verify_nodes_can_reach_head)
-        planned_nodes, grow_cpus_remaining, grow_config = _plan_grow_if_needed(
-            target_parallelism=target_parallelism,
-            n_inputs=n_inputs,
-            max_parallelism=max_parallelism,
-            func_cpu=func_cpu,
-            func_ram=func_ram,
-            func_gpu=func_gpu,
-            region=region,
-            disk_gb=disk_gb,
+        planned_nodes, grow_cpus_remaining, grow_gpus_remaining, grow_config = (
+            _plan_grow_if_needed(
+                target_parallelism=target_parallelism,
+                n_inputs=n_inputs,
+                max_parallelism=max_parallelism,
+                func_cpu=func_cpu,
+                func_ram=func_ram,
+                func_gpu=func_gpu,
+                region=region,
+                disk_gb=disk_gb,
+            )
         )
     booting_nodes = [
         {
@@ -430,8 +448,10 @@ async def start_job(
         "region": region,
         "disk_gb": disk_gb,
         "grow": grow,
-        # Remaining CPU budget for mid-job replacement boots (None = uncapped).
+        # Remaining budgets for mid-job replacement boots (None = not
+        # applicable: CPU jobs have no GPU budget and vice versa).
         "grow_cpus_remaining": grow_cpus_remaining,
+        "grow_gpus_remaining": grow_gpus_remaining,
         "packages": body.get("packages") or {},
         "status": "RUNNING",
         "burla_client_version": client_version,
@@ -448,8 +468,13 @@ async def start_job(
         "raise_errors": bool(body.get("raise_errors", True)),
         # Set by nested rpm calls made from inside a worker: this job then
         # nests under the enclosing job in the dashboard instead of appearing
-        # as its own top-level row.
+        # as its own top-level row. run/index/depth record the call's position
+        # in the enclosing UDF invocation's happens-before order, which the
+        # dashboard's structure graph renders as stages and branches.
         "parent_job_id": body.get("parent_job_id"),
+        "parent_run_id": body.get("parent_run_id"),
+        "parent_call_index": body.get("parent_call_index"),
+        "parent_call_depth": body.get("parent_call_depth"),
         "all_inputs_uploaded": False,
         "client_has_all_results": False,
         "fail_reason": [],

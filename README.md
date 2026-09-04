@@ -54,7 +54,6 @@ This example asks Burla to scale the job to 1,000 CPUs and run 1,000 function ca
 - **Adaptive concurrency.** On CPU nodes, the default dynamic CPU and RAM settings start one worker per CPU, then reduce node concurrency under pressure when possible.
 - **Built-in dashboard.** View live logs and node status locally; deploy it for background jobs and access from any device.
 
-
 ## Contributing
 
 Bug reports and feature requests are welcome in [GitHub issues](https://github.com/Burla-Cloud/burla/issues). If you'd like to contribute code, open an issue first so we can point you in the right direction. To report a security issue, email security@burla.dev.

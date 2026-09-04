@@ -54,6 +54,8 @@ export interface Settings {
     machineQuantity: number;
     diskSize: number; // in GB
     inactivityTimeout: number; // in minutes
+    maxVcpus: number;
+    maxGpus: Record<string, number>; // GPU model (e.g. "A100") -> global cap
     users: string[];
     gcpRegion?: string;
     burlaVersion?: string;

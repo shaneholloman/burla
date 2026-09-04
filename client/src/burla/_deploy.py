@@ -15,7 +15,6 @@ from yaspin import yaspin
 from burla import (
     _BURLA_BACKEND_URL,
     _BURLA_ENVIRONMENT,
-    _BURLA_NODE_SOURCE_REF,
     _BURLA_RELAY_HOST,
     __version__,
 )
@@ -37,13 +36,25 @@ FRP_VERSION = "0.70.1"
 
 def head_install_spec() -> str:
     """What the head VM pip-installs. Production heads install the published
-    release; test heads install the same ref the nodes run, so a test deploy is
-    exactly the dev branch (the built dashboard is committed, so this works)."""
+    release; test heads install the dev branch. Nodes then download whatever
+    their head is running, so this ref decides the whole cluster's code."""
     if _BURLA_ENVIRONMENT == "production":
         return f"burla=={__version__}"
     return (
         "burla @ git+https://github.com/Burla-Cloud/burla.git"
-        f"@{_BURLA_NODE_SOURCE_REF}#subdirectory=client"
+        "@dev#subdirectory=client"
+    )
+
+
+def head_install_command() -> str:
+    command = f'pip install --no-cache-dir "{head_install_spec()}"'
+    if _BURLA_ENVIRONMENT == "production":
+        return command
+    return (
+        "apt-get update && "
+        "apt-get install -y --no-install-recommends nodejs npm && "
+        "rm -rf /var/lib/apt/lists/* && "
+        f"{command}"
     )
 
 
@@ -124,8 +135,7 @@ def _head_startup_script(
     dashboard_hostname: str,
     custom_dashboard_hostname: str | None = None,
 ) -> str:
-    node_source_ref = _BURLA_NODE_SOURCE_REF
-    install_spec = head_install_spec()
+    install_command = head_install_command()
     relay_subdomain = f"head--{project_id}"
     dashboard_hostnames = [dashboard_hostname]
     if custom_dashboard_hostname:
@@ -185,9 +195,8 @@ subdomain = "{relay_subdomain}"
       -e BURLA_RELAY_HOST="{RELAY_HOST}" \\
       -e BURLA_RELAY_SERVER_ADDR="{RELAY_SERVER_ADDR}" \\
       -e BURLA_RELAY_SERVER_PORT="{RELAY_SERVER_PORT}" \\
-      -e BURLA_NODE_SOURCE_REF="{node_source_ref}" \\
       python:3.13 \\
-      sh -c 'pip install --no-cache-dir "{install_spec}" && exec python -m uvicorn main_service:app --host 0.0.0.0 --port 5001 --workers 1 --timeout-keep-alive 60'
+      sh -c '{install_command} && exec python -m uvicorn main_service:app --host 0.0.0.0 --port 5001 --workers 1 --timeout-keep-alive 60'
     until docker exec burla-main-service \\
       python -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:5001/version")' \\
       >/dev/null 2>&1; do

@@ -8,8 +8,6 @@ import ssl
 from time import time
 from uuid import uuid4
 
-import psutil
-
 from node_service import (
     SELF,
     INSTANCE_NAME,
@@ -23,14 +21,22 @@ from node_service.helpers import Logger, debug_log, format_traceback
 from node_service.lifecycle_endpoints import reboot_containers
 from node_service.worker_client import (
     CPU_PRESSURE_FILE,
+    CPU_UTILIZATION_ADD_MAX,
+    DYNAMIC_RAM_MAX_WORKER_MEMORY_USED_FRACTION,
+    GATE_EWMA_TAU_SECONDS,
     READD_MAX_CPU_STALL_FRACTION,
     READD_MAX_IO_STALL_FRACTION,
+    READD_MAX_MEMORY_STALL_FRACTION,
     READD_MAX_NETWORK_UTILIZATION_FRACTION,
     READD_MAX_WORKER_MEMORY_USED_FRACTION,
     SLOT_TRADE_PRESSURE_COOLDOWN_SECONDS,
     AddGateSampler,
+    Ewma,
+    SliceCpuSampler,
     WorkerStallTracker,
     _workers_memory_limit_bytes,
+    _workers_memory_used_bytes,
+    parks_in_last,
 )
 
 EMPTY_NEIGHBOR_TIMEOUT_SEC = 120
@@ -38,10 +44,14 @@ CLIENT_CONTACT_TIMEOUT_SEC = 5
 ACK_RETRY_TIMEOUT_SEC = 600
 ACK_RETRY_DELAY_SEC = 15
 WORKER_CLEANUP_TIMEOUT_SEC = 120
-# How long a worker deficit must persist before this node asks the head to
-# boot replacement machines for it. Long enough for transient pressure to
-# clear and for un-retiring to win when the machine recovers on its own.
-REPLACEMENT_DEFICIT_WINDOW_SEC = 60
+# How long a worker deficit must persist, with the recovery loop's add-gates
+# red the entire time, before this node asks the head to boot replacement
+# machines for it. Red gates the whole window prove the machine genuinely
+# cannot host its slots; any green reading restarts the clock, because green
+# gates mean the recovery loop can absorb the deficit itself. (A 60s
+# deficit-only window once declared parked capacity "permanently lost" that
+# hundreds of later unthrottles recovered.)
+REPLACEMENT_DEFICIT_WINDOW_SEC = 180
 REPLACEMENT_RETRY_SEC = 60
 
 # Slot acquisition: how often a hungry node may ask its ring neighbor for
@@ -53,6 +63,41 @@ REPLACEMENT_RETRY_SEC = 60
 # node just invented.
 TRADE_INTERVAL_SEC = 15
 MINT_MAX_SLOTS_PER_ATTEMPT = 32
+# Mint refractory and sizing. Minting once manufactured its own demand on a
+# two-phase workload: a download lull read as spare capacity, and the minted
+# slots then guaranteed the next pressure spike. Every mint requires green
+# smoothed gates while every worker is busy for one full EWMA time constant
+# (with the EWMAs aged past ramp lag: three NEXRAD reruns showed a fresh
+# node's first minute of full load reads download-lean, so ramp always looks
+# green), plus a park-free last minute, and the batch halves per park in the
+# last five minutes. Sizing is proportional to measured idle headroom: a
+# machine at least half idle is demonstrably IO-bound and may take its full
+# headroom in one batch, while a busy machine takes half its remaining
+# headroom (in cores) per step. Half-the-gap steps converge geometrically
+# without overshoot (fixed one-slot creep proved far too slow to reach
+# saturation); the walk ends when queueing (stall past the re-add bar)
+# breaks the streak, which lands at "every core busy, stall still under
+# half the park trigger" - the oversubscription target - instead of an
+# arbitrary utilization line.
+#
+# Cadence: the full streak is required before the first mint (EWMA ramp
+# anchor) and again after any park, but between consecutive mints on a
+# park-free node the wait drops to MINT_STEP_INTERVAL_SEC. One full time
+# constant between every step meant a 12-minute IO-bound job spent its
+# whole life ramping and peaked at ~50% CPU (observed on pd12m); parks
+# remain the fast brake, and any park in the halving window restores the
+# slow cadence.
+MINT_PARK_REFRACTORY_SEC = 60
+MINT_GREEN_STREAK_SEC = GATE_EWMA_TAU_SECONDS
+MINT_STEP_INTERVAL_SEC = 15
+MINT_BULK_MAX_UTILIZATION = 0.5
+MINT_BATCH_HALVING_LOOKBACK_SEC = 300
+# There is deliberately no local ceiling on minted parallelism: slots are
+# granted by the head's mint controller (main_service/mint_controller.py),
+# which only keeps funding growth while job-wide goodput measurably rises
+# with it. A workload stalled on something no local gate can see (a
+# rate-limited server, zram-hidden memory thrash) stops earning grants
+# instead of walking to an arbitrary per-core cap.
 # The set of nodes on a job changes rarely, so re-asking the head is cheap to do
 # seldom. Matches the client's wait before it hands a booting node the job.
 PEER_RECHECK_INTERVAL_SEC = 30
@@ -107,11 +152,14 @@ async def _neighbor_finished_scoped_job(neighbor_id: str) -> bool:
 
 async def _claim_drained_job_part() -> bool:
     # Serialize this decision with get_inputs so a peer cannot park a batch
-    # after this node has decided it is safe to leave the job.
+    # after this node has decided it is safe to leave the job. A requester
+    # must also finish its own GET/ACK transaction: otherwise its task can be
+    # canceled after the donor removes a batch but before the ACK settles it.
     async with SELF["input_transfer_lock"]:
         drained = (
             SELF["inputs_queue"].empty()
             and not SELF["pending_transfers"]
+            and SELF["active_input_steal_id"] is None
             and all(w.is_idle or w.retired for w in SELF["workers"])
             and SELF["results_queue"].empty()
             and SELF["pending_result_batch"] is None
@@ -161,6 +209,7 @@ async def _input_steal_loop(session, logger, job_started_at):
             continue
 
         transfer_id = uuid4().hex
+        SELF["active_input_steal_id"] = transfer_id
         remaining_inputs = SELF["inputs_queue"].qsize()
         # Idle unthrottled workers = genuinely free capacity right now. The
         # neighbor uses this to decide whether revoking its parked (throttled)
@@ -187,6 +236,7 @@ async def _input_steal_loop(session, logger, job_started_at):
                 get_url, params=get_params, headers=SELF["auth_headers"]
             ) as response:
                 if response.status == 404:
+                    SELF["active_input_steal_id"] = None
                     continue
                 if response.status == 200:
                     items = pickle.loads(await response.read())
@@ -198,10 +248,19 @@ async def _input_steal_loop(session, logger, job_started_at):
             )
 
         if items:
-            for input_index, input_pkl in items:
-                SELF["inputs_queue"].put_nowait(
-                    (input_index, input_pkl), len(input_pkl)
-                )
+            # should_steal() passed before the GET, but a trade can zero the
+            # target mid-flight; inputs enqueued after that have no workers
+            # left to run them and stall the job forever (observed). The
+            # retire lock serializes this against trade_slots; a node traded
+            # to zero bounces the batch so the neighbor requeues it.
+            async with SELF["dynamic_retire_lock"]:
+                if SELF["target_parallelism"] > 0:
+                    for input_index, input_pkl in items:
+                        SELF["inputs_queue"].put_nowait(
+                            (input_index, input_pkl), len(input_pkl)
+                        )
+                else:
+                    items = None
 
         received = bool(items)
 
@@ -241,6 +300,7 @@ async def _input_steal_loop(session, logger, job_started_at):
                     break
                 await asyncio.sleep(ACK_RETRY_DELAY_SEC)
 
+        SELF["active_input_steal_id"] = None
         if not ack_ok:
             reason = (
                 f"Could not ACK transfer {transfer_id} to {neighbor_id} after "
@@ -271,14 +331,18 @@ async def _slot_trade_loop(session, logger):
     queued inputs than workers. Slots come from the ring neighbor first (it
     gives up capacity it is using worse - see `trade_slots` in
     job_endpoints.py - and a neighbor drained to zero frees its machine);
-    any remainder is minted outright when the job's parallelism is otherwise
-    unconstrained (see mint_slots_allowed in job_endpoints.py). The re-add
-    loop then boots workers toward the raised count one per second with every
-    add-gate re-checked, so saturation (CPU stall, disk IO stall, NIC
-    utilization, worker RSS) is the only ceiling on how far a node
-    oversubscribes. Only meaningful for fully dynamic jobs: with a fixed
-    func_cpu/func_ram, packing extra workers in would break the per-call
-    resource guarantee. GPU nodes never oversubscribe (one worker per GPU).
+    any remainder is requested from the head's mint controller when the
+    job's parallelism is otherwise unconstrained (see mint_slots_allowed in
+    job_endpoints.py), which only grants while job-wide goodput measurably
+    rises with added workers. The re-add loop then boots workers toward the
+    raised count one per second with every add-gate re-checked, so
+    saturation (CPU stall, disk IO stall, NIC utilization, worker RSS) caps
+    how far a node oversubscribes, and the mint refractory (see
+    MINT_PARK_REFRACTORY_SEC) keeps minting from re-creating the saturation
+    it just measured its way out of. Only meaningful for fully dynamic jobs:
+    with a fixed func_cpu/func_ram, packing extra workers in would break the
+    per-call resource guarantee. GPU nodes never oversubscribe (one worker
+    per GPU).
     """
     fully_dynamic = SELF["dynamic_func_cpu"] and SELF["dynamic_func_ram"]
     if not fully_dynamic or NUM_GPUS:
@@ -286,19 +350,74 @@ async def _slot_trade_loop(session, logger):
     can_check_cpu = CPU_PRESSURE_FILE.exists()
     stall_tracker = WorkerStallTracker()
     gate_sampler = AddGateSampler()
+    cpu_sampler = SliceCpuSampler()
+    stall_ewma = Ewma(GATE_EWMA_TAU_SECONDS)
+    io_ewma = Ewma(GATE_EWMA_TAU_SECONDS)
+    network_ewma = Ewma(GATE_EWMA_TAU_SECONDS)
+    memory_ewma = Ewma(GATE_EWMA_TAU_SECONDS)
+    utilization_ewma = Ewma(GATE_EWMA_TAU_SECONDS)
+    mint_gates_green_since = None
+    fully_busy_since = None
+    last_mint_at = None
 
     while not SELF["job_watcher_stop_event"].is_set():
         await asyncio.sleep(1)
+
+        # Sample every tick, not only when a trade is due: the smoothed gates
+        # and the mint loop's green-streak clock are meaningless unless they
+        # see every second.
+        alive_workers = [w for w in SELF["workers"] if not w.retired]
+        raw_stall = 0.0
+        if can_check_cpu:
+            unthrottled_workers = [w for w in alive_workers if not w.throttled]
+            raw_stall = stall_tracker.max_stall_fraction(unthrottled_workers)
+        stall_fraction = stall_ewma.update(raw_stall)
+        raw_io_stall, raw_network_utilization, raw_memory_stall = (
+            gate_sampler.sample()
+        )
+        io_stall = io_ewma.update(raw_io_stall)
+        network_utilization = network_ewma.update(raw_network_utilization)
+        memory_stall = memory_ewma.update(raw_memory_stall)
+        utilization = utilization_ewma.update(cpu_sampler.sample(alive_workers))
+
+        mint_gates_green = (
+            stall_fraction <= READD_MAX_CPU_STALL_FRACTION
+            and io_stall <= READD_MAX_IO_STALL_FRACTION
+            and network_utilization <= READD_MAX_NETWORK_UTILIZATION_FRACTION
+            and memory_stall <= READD_MAX_MEMORY_STALL_FRACTION
+            and utilization <= CPU_UTILIZATION_ADD_MAX
+        )
+        # The green streak only counts while the EWMAs have averaged over a
+        # full time constant of full-parallelism load (see
+        # MINT_GREEN_STREAK_SEC); anything measured before that is ramp lag.
+        # A backlogged node counts as fully busy even when the 1 Hz busy
+        # sample dips below the worker count: with sub-second tasks those
+        # dips are sampling artifacts and resetting on them starved an
+        # IO-bound job of every mint (observed). Nothing-executing still
+        # resets, so install / assignment phases never start the clock.
+        fully_busy = (
+            bool(alive_workers)
+            and SELF["current_parallelism"] > 0
+            and (
+                SELF["current_parallelism"] >= len(alive_workers)
+                or SELF["inputs_queue"].qsize() > len(alive_workers)
+            )
+        )
+        if not fully_busy:
+            fully_busy_since = None
+        elif fully_busy_since is None:
+            fully_busy_since = time()
+        ewmas_warm = (
+            fully_busy_since is not None
+            and time() - fully_busy_since >= GATE_EWMA_TAU_SECONDS
+        )
+        if not mint_gates_green or not ewmas_warm:
+            mint_gates_green_since = None
+        elif mint_gates_green_since is None:
+            mint_gates_green_since = time()
+
         if time() - SELF["last_slot_trade_attempt_at"] < TRADE_INTERVAL_SEC:
             continue
-
-        stall_fraction = 0.0
-        if can_check_cpu:
-            unthrottled_workers = [
-                w for w in SELF["workers"] if not w.retired and not w.throttled
-            ]
-            stall_fraction = stall_tracker.max_stall_fraction(unthrottled_workers)
-        io_stall, network_utilization = gate_sampler.sample()
 
         if SELF["target_parallelism"] <= 0:
             return  # traded out; this node is on its way off the job
@@ -314,7 +433,6 @@ async def _slot_trade_loop(session, logger):
         )
         if recently_pressured:
             continue
-        alive_workers = [w for w in SELF["workers"] if not w.retired]
         # A deficit is the re-add / replacement paths' problem, not trading's.
         if len(alive_workers) != SELF["target_parallelism"]:
             continue
@@ -327,17 +445,14 @@ async def _slot_trade_loop(session, logger):
             continue
         if network_utilization > READD_MAX_NETWORK_UTILIZATION_FRACTION:
             continue
+        if memory_stall > READD_MAX_MEMORY_STALL_FRACTION:
+            continue
         if not IN_LOCAL_DEV_MODE and alive_workers:
-            memory_limit_bytes = _workers_memory_limit_bytes(alive_workers[0])
-            used_bytes = 0
-            for worker in alive_workers:
-                try:
-                    used_bytes += worker.memory_rss_bytes()
-                except psutil.NoSuchProcess:
-                    used_bytes = None  # worker mid-relaunch; skip this tick
-                    break
-            if used_bytes is None:
-                continue
+            try:
+                memory_limit_bytes = _workers_memory_limit_bytes(alive_workers[0])
+                used_bytes = _workers_memory_used_bytes(alive_workers[0], alive_workers)
+            except OSError:
+                continue  # that worker's process just died; skip this tick
             if used_bytes / memory_limit_bytes > READD_MAX_WORKER_MEMORY_USED_FRACTION:
                 continue
 
@@ -389,29 +504,89 @@ async def _slot_trade_loop(session, logger):
             SELF["slot_trade_id"] = None
             if granted:
                 SELF["target_parallelism"] += granted
+            now = time()
             await debug_log(
                 "trade_result",
                 neighbor=neighbor_id,
                 requested=want,
                 granted=granted,
                 target_now=SELF["target_parallelism"],
+                # Mint-gate forensics: which condition is holding minting back.
+                stall=round(stall_fraction, 4),
+                io=round(io_stall, 4),
+                net=round(network_utilization, 4),
+                mem=round(memory_stall, 4),
+                util=round(utilization, 4),
+                busy=SELF["current_parallelism"],
+                busy_age=(
+                    round(now - fully_busy_since, 1) if fully_busy_since else None
+                ),
+                green_age=(
+                    round(now - mint_gates_green_since, 1)
+                    if mint_gates_green_since
+                    else None
+                ),
             )
 
-        # The neighbor covered what it could; mint the rest. Every node on a
-        # saturated-but-idle job hits this path together, which is exactly the
-        # case trading can never help with (nobody has spares) and the reason
-        # minting exists.
+        # The neighbor covered what it could; ask the head to mint the rest.
+        # Every node on a saturated-but-idle job hits this path together,
+        # which is exactly the case trading can never help with (nobody has
+        # spares) and the reason minting exists.
         if not SELF["mint_slots_allowed"]:
             continue
-        minted = min(want - granted, MINT_MAX_SLOTS_PER_ATTEMPT)
+        # Mint refractory (see MINT_PARK_REFRACTORY_SEC): one instantaneously
+        # green sample is not spare capacity, and neither is a green quarter
+        # minute during startup.
+        if parks_in_last(MINT_PARK_REFRACTORY_SEC) > 0:
+            continue
+        recent_parks = parks_in_last(MINT_BATCH_HALVING_LOOKBACK_SEC)
+        # Cadence (see MINT_STEP_INTERVAL_SEC): full streak before the first
+        # mint and after any park, fast steps between mints on a clean node.
+        slow_cadence = last_mint_at is None or recent_parks > 0
+        required_wait = MINT_GREEN_STREAK_SEC if slow_cadence else MINT_STEP_INTERVAL_SEC
+        green_age = (
+            time() - mint_gates_green_since if mint_gates_green_since else 0.0
+        )
+        if green_age < required_wait:
+            continue
+        if last_mint_at is not None and time() - last_mint_at < required_wait:
+            continue
+        mint_cap = max(1, MINT_MAX_SLOTS_PER_ATTEMPT >> recent_parks)
+        # Proportional sizing (see the comment on MINT_BULK_MAX_UTILIZATION):
+        # an IO-bound machine may take its full measured headroom, a busy one
+        # takes half the remaining gap per step so it converges on saturation
+        # without overshooting it.
+        headroom_slots = int(
+            (CPU_UTILIZATION_ADD_MAX - utilization) * (os.cpu_count() or 1)
+        )
+        if utilization <= MINT_BULK_MAX_UTILIZATION:
+            batch_limit = headroom_slots
+        else:
+            batch_limit = max(1, headroom_slots // 2)
+        asked = min(want - granted, mint_cap, batch_limit)
+        if asked <= 0:
+            continue
+        try:
+            minted = await head_client.request_mint(SELF["current_job"], asked)
+        except Exception as error:
+            await debug_log(
+                "mint_request_failed",
+                asked=asked,
+                error=f"{type(error).__name__}: {error}",
+            )
+            continue
         if minted <= 0:
             continue
         SELF["target_parallelism"] += minted
+        last_mint_at = time()
         await debug_log(
             "slots_minted",
             backlog=queued_inputs,
             traded=granted,
+            asked=asked,
             minted=minted,
+            mint_cap=mint_cap,
+            parks_last_5min=recent_parks,
             target_now=SELF["target_parallelism"],
         )
 
@@ -532,9 +707,15 @@ async def _job_watcher(
         else:
             if SELF["replacement_deficit_since"] is None:
                 SELF["replacement_deficit_since"] = time()
+            # The window only counts time with the recovery loop's add-gates
+            # red (see REPLACEMENT_DEFICIT_WINDOW_SEC); a green reading means
+            # this machine can still absorb the deficit itself.
+            deficit_red_since = SELF["replacement_deficit_since"]
+            last_green_at = SELF["readd_gates_last_green_at"]
+            if last_green_at is not None and last_green_at > deficit_red_since:
+                deficit_red_since = last_green_at
             deficit_sustained = (
-                time() - SELF["replacement_deficit_since"]
-                > REPLACEMENT_DEFICIT_WINDOW_SEC
+                time() - deficit_red_since > REPLACEMENT_DEFICIT_WINDOW_SEC
             )
             retry_ok = (
                 time() - SELF["last_replacement_request_at"] > REPLACEMENT_RETRY_SEC
@@ -547,9 +728,37 @@ async def _job_watcher(
                 if SELF["replacement_request_id"] is None:
                     SELF["replacement_request_id"] = uuid4().hex
                 request_id = SELF["replacement_request_id"]
+                # Memory sheds are what shrink the pool; after them the alive
+                # count is this machine type's measured capacity for the job.
+                # A fresh node starts its slots together, though, so they
+                # peak together: cap the target at what fits when every
+                # worker is at a typical attempt's peak (its recovery loop
+                # probes up to the mixed-phase steady state from there).
+                # Observed without the cap: ~150 attempts 3-8 minutes old
+                # killed within six minutes of each replacement wave.
+                slots_per_node = None
+                if SELF["last_memory_shed_at"]:
+                    slots_per_node = alive_workers
+                    typical_peak = SELF["typical_attempt_peak_rss_bytes"]
+                    live_workers = [
+                        worker
+                        for worker in SELF["workers"]
+                        if not worker.retired and worker.worker_host_pid is not None
+                    ]
+                    if typical_peak and live_workers:
+                        try:
+                            limit_bytes = _workers_memory_limit_bytes(live_workers[0])
+                        except OSError:
+                            limit_bytes = None  # that worker died mid-read
+                        if limit_bytes:
+                            fits_at_peak = int(
+                                limit_bytes * DYNAMIC_RAM_MAX_WORKER_MEMORY_USED_FRACTION
+                                // typical_peak
+                            )
+                            slots_per_node = max(1, min(alive_workers, fits_at_peak))
                 try:
                     response = await head_client.request_replacement_nodes(
-                        SELF["current_job"], deficit, request_id
+                        SELF["current_job"], deficit, request_id, slots_per_node
                     )
                     SELF["replacement_request_id"] = None
                     SELF["replacement_deficit_since"] = None
@@ -623,6 +832,63 @@ async def _job_watcher(
                 results=SELF["num_results_received"],
             )
 
+        # Mint-epoch rollback (see head_client.push_state): with a backlog,
+        # every worker is busy and sheds itself between inputs (see the check
+        # at the top of _process_inputs). Workers parked on an empty queue
+        # never reach that check, so they are retired here instead - but only
+        # while the queue is empty under the retire lock (matching
+        # trade_slots), because cancelling a get() that was just handed an
+        # input loses that input (observed: a rollback ended a job 1499/1500).
+        if SELF["shed_slots_pending"] > 0:
+            shed_now = []
+            async with SELF["dynamic_retire_lock"]:
+                if SELF["inputs_queue"].qsize() == 0:
+                    for worker in SELF["workers"]:
+                        if SELF["shed_slots_pending"] <= 0:
+                            break
+                        if worker.retired or not worker.is_idle:
+                            continue
+                        if worker.current_input is not None:
+                            continue
+                        SELF["shed_slots_pending"] -= 1
+                        worker.retired = True
+                        SELF["reboot_containers_after_job"] = True
+                        # The task is parked on inputs_queue.get(); left
+                        # alive it would swallow (and lose) the next input
+                        # to arrive.
+                        if worker.process_inputs_task is not None:
+                            worker.process_inputs_task.cancel()
+                        shed_now.append(worker)
+            for worker in shed_now:
+                await worker.retire_for_pressure()
+            if shed_now:
+                await debug_log(
+                    "workers_shed",
+                    retired_idle=len(shed_now),
+                    still_pending=SELF["shed_slots_pending"],
+                    target_now=SELF["target_parallelism"],
+                )
+
+        # Safety net for stranded inputs: with zero alive workers and zero
+        # target, nothing ever drains the queue (the re-add loop sees no
+        # deficit and peers that finished their share never steal again), so
+        # any input that slipped in after a trade-to-zero deadlocks the job.
+        # Reclaiming target lets the re-add loop boot workers to finish it.
+        stranded = (
+            SELF["inputs_queue"].qsize() > 0
+            and SELF["target_parallelism"] == 0
+            and not any(not w.retired for w in SELF["workers"])
+        )
+        if stranded:
+            SELF["target_parallelism"] = min(
+                SELF["inputs_queue"].qsize(), os.cpu_count()
+            )
+            await debug_log(
+                "stranded_inputs_reclaimed",
+                queued_inputs=SELF["inputs_queue"].qsize(),
+                target_now=SELF["target_parallelism"],
+            )
+
         # A job that stops advancing is only diagnosable if you can see where
         # its inputs went: this node's queue, a parked transfer, or a worker.
         if current_num_results != last_progress_result_count:
@@ -635,6 +901,7 @@ async def _job_watcher(
                 queued_inputs=SELF["inputs_queue"].qsize(),
                 inputs_in_transfer=pending_transfer_count,
                 transfers=list(SELF["pending_transfers"]),
+                active_input_steal=SELF["active_input_steal_id"],
                 busy_workers=SELF["current_parallelism"],
                 results_produced=current_num_results,
                 queued_results=SELF["results_queue"].qsize(),

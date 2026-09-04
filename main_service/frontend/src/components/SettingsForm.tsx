@@ -122,6 +122,14 @@ export const SettingsForm = forwardRef<
         });
     };
 
+    const handleMaxGpusChange = (model: string, value: number) => {
+        setSettings((prev) => {
+            const changed = prev.maxGpus[model] !== value;
+            if (changed) onChange();
+            return changed ? { ...prev, maxGpus: { ...prev.maxGpus, [model]: value } } : prev;
+        });
+    };
+
     const addUser = () => {
         const email = newUser.trim();
         if (!email) return;
@@ -417,6 +425,71 @@ export const SettingsForm = forwardRef<
                             }}
                         />
                     </div>
+                </div>
+            </section>
+
+            <section className="px-5 py-5">
+                <div className="flex items-center gap-1.5">
+                    <h2 className="text-sm font-semibold text-foreground">Scaling limits</h2>
+                    <TooltipProvider>
+                        <Tooltip>
+                            <TooltipTrigger asChild>
+                                <InfoIcon className="h-3.5 w-3.5 cursor-help text-muted-foreground/70 hover:text-muted-foreground" />
+                            </TooltipTrigger>
+                            <TooltipContent>
+                                <p>
+                                    Hard ceilings on total cluster size. Jobs started with grow=True add
+                                    machines automatically, but never past these limits.
+                                </p>
+                            </TooltipContent>
+                        </Tooltip>
+                    </TooltipProvider>
+                </div>
+
+                <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-4">
+                    <div>
+                        <label className={`${labelClass} mb-1.5`}>Max vCPUs</label>
+                        <Input
+                            type="text"
+                            inputMode="numeric"
+                            className="w-full"
+                            value={settings.maxVcpus ?? ""}
+                            onChange={(e) => {
+                                const digits = e.target.value.replace(/\D/g, "");
+                                const num = digits === "" ? 0 : parseInt(digits, 10);
+                                handleInputChange("maxVcpus", num);
+                            }}
+                            onBlur={(e) => {
+                                const val = parseInt(e.target.value, 10);
+                                if (val > constraints.max_vcpus.maximum) {
+                                    handleInputChange("maxVcpus", constraints.max_vcpus.maximum);
+                                }
+                            }}
+                        />
+                    </div>
+
+                    {Object.entries(settings.maxGpus ?? {}).map(([model, cap]) => (
+                        <div key={model}>
+                            <label className={`${labelClass} mb-1.5`}>Max {model}s</label>
+                            <Input
+                                type="text"
+                                inputMode="numeric"
+                                className="w-full"
+                                value={cap ?? ""}
+                                onChange={(e) => {
+                                    const digits = e.target.value.replace(/\D/g, "");
+                                    const num = digits === "" ? 0 : parseInt(digits, 10);
+                                    handleMaxGpusChange(model, num);
+                                }}
+                                onBlur={(e) => {
+                                    const val = parseInt(e.target.value, 10);
+                                    if (val > constraints.max_gpus.maximum) {
+                                        handleMaxGpusChange(model, constraints.max_gpus.maximum);
+                                    }
+                                }}
+                            />
+                        </div>
+                    ))}
                 </div>
             </section>
 

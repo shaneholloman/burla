@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 
 import requests
 
-from burla import _BURLA_BACKEND_URL, _BURLA_NODE_SOURCE_REF, __version__
+from burla import _BURLA_BACKEND_URL, __version__
 from burla._aws_amis import node_ami_hash as _node_ami_hash
 from burla._aws_amis import node_ami_name_prefix, public_node_ami_id
 from burla._aws_amis import node_ami_setup_script as _node_ami_setup_script
@@ -26,7 +26,7 @@ from burla._deploy import (
     RELAY_HOST,
     RELAY_SERVER_ADDR,
     RELAY_SERVER_PORT,
-    head_install_spec,
+    head_install_command,
 )
 from burla._helpers import VerboseCalledProcessError, run_command
 from burla._reporting import log_telemetry
@@ -42,8 +42,7 @@ def _head_setup_commands(
     cluster_id_token: str,
     account_name: str,
 ) -> list[str]:
-    node_source_ref = _BURLA_NODE_SOURCE_REF
-    install_spec = head_install_spec()
+    install_command = head_install_command()
     relay_subdomain = f"head--{project_id}"
     return [
         "set -eu",
@@ -75,9 +74,8 @@ def _head_setup_commands(
             f'-e BURLA_RELAY_HOST="{RELAY_HOST}" '
             f'-e BURLA_RELAY_SERVER_ADDR="{RELAY_SERVER_ADDR}" '
             f'-e BURLA_RELAY_SERVER_PORT="{RELAY_SERVER_PORT}" '
-            f'-e BURLA_NODE_SOURCE_REF="{node_source_ref}" '
             "python:3.13 "
-            f'sh -c \'pip install --no-cache-dir "{install_spec}" '
+            f"sh -c '{install_command} "
             "&& exec python -m uvicorn main_service:app "
             "--host 127.0.0.1 --port 5001 --workers 1 --timeout-keep-alive 60'"
         ),

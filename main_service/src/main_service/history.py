@@ -1518,7 +1518,10 @@ def jobs_with_parents(parent_ids: list[str]) -> list[dict]:
                 "json_extract(data, '$.func_cpu'), "
                 "json_extract(data, '$.func_ram'), "
                 "json_extract(data, '$.func_gpu'), "
-                "json_extract(data, '$.max_parallelism') "
+                "json_extract(data, '$.max_parallelism'), "
+                "json_extract(data, '$.parent_run_id'), "
+                "json_extract(data, '$.parent_call_index'), "
+                "json_extract(data, '$.parent_call_depth') "
                 f"FROM jobs WHERE parent_job_id IN ({placeholders}) "
                 "ORDER BY started_at",
                 chunk,
@@ -1538,6 +1541,9 @@ def jobs_with_parents(parent_ids: list[str]) -> list[dict]:
                         "func_ram": row[9],
                         "func_gpu": row[10],
                         "max_parallelism": row[11],
+                        "parent_run_id": row[12],
+                        "parent_call_index": row[13],
+                        "parent_call_depth": row[14],
                     }
                 )
     return jobs

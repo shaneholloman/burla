@@ -4,6 +4,10 @@ import hashlib
 # cannot be substituted by another publisher.
 PUBLIC_AMI_OWNER_ID = "018789813546"
 
+# The in-script clone below only pre-warms /opt/burla/.venv: at boot the
+# startup script replaces those dirs with code downloaded from the head.
+# This comment lives outside the script because the script text is hashed
+# into the image name; editing it means republishing images.
 _NODE_AMI_SETUP_SCRIPT = """#!/bin/bash
 set -euxo pipefail
 export DEBIAN_FRONTEND=noninteractive

@@ -114,11 +114,11 @@ def test_spinner_false_uses_print_path(rpm_subprocess, local_dev_cluster):
 def test_func_ram_too_high_raises_NoCompatibleNodes_or_grows(
     rpm_subprocess, local_dev_cluster
 ):
-    # n4-standard-2 only has 8GB RAM. Asking for 32GB per call on local-dev
-    # should result in either NoCompatibleNodes (grow=False) or an attempt
-    # to boot larger nodes capped by LOCAL_DEV_MAX_GROW_CPUS=4.
+    # 64GB per call exceeds every dev node: local-dev's fake VM (8GB machine
+    # type) and remote-dev's m7i.2xlarge (32GB). With grow=False the job must
+    # be rejected, not run degraded.
     source = "def test_function(x):\n    return x\n"
-    result = rpm_subprocess(source, [1], timeout_seconds=30, func_ram=32, grow=False)
+    result = rpm_subprocess(source, [1], timeout_seconds=30, func_ram=64, grow=False)
     assert not result["ok"]
     assert result["exception_type"] in ("NoCompatibleNodes", "NoNodes")
 

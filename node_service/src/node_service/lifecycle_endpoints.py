@@ -20,7 +20,11 @@ from node_service import (
     refresh_authorized_users,
 )
 from node_service.helpers import Logger
-from node_service.worker_client import WorkerClient, verify_worker_cgroup_isolation
+from node_service.worker_client import (
+    WorkerClient,
+    calibrate_swap_rate,
+    verify_worker_cgroup_isolation,
+)
 
 router = APIRouter()
 
@@ -299,6 +303,8 @@ async def reboot_containers(
                 severity="WARNING",
             )
 
+        # Overlaps the image pull and worker boot, so it adds no boot time.
+        swap_calibration = asyncio.create_task(calibrate_swap_rate(logger))
         docker = aiodocker.Docker()
         try:
             # remove all worker containers
@@ -334,6 +340,7 @@ async def reboot_containers(
         await workers[0].boot()
         await asyncio.gather(*[worker.boot() for worker in workers[1:]])
         await verify_worker_cgroup_isolation(workers, logger)
+        await swap_calibration
         SELF["BOOTING"] = False
 
         # main_service learns the host when it creates the VM/container and

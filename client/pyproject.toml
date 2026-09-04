@@ -1,6 +1,6 @@
 [project]
 name = "burla"
-version = "1.7.12"
+version = "1.8.0"
 description = "Easy to use cluster-compute software."
 requires-python = ">=3.11"
 # This wheel vendors main_service, so every main_service runtime dependency
@@ -51,7 +51,8 @@ build-backend = "hatchling.build"
 packages = ["src/burla"]
 
 # Client-hosted mode runs the cluster head from inside this package, so the
-# wheel ships main_service (dashboard static files included) alongside burla.
+# wheel ships main_service (dashboard static files included) alongside burla,
+# plus node_service so installed heads can serve booting nodes their code.
 # The hook supports both direct wheel builds and wheels built from the sdist.
 [tool.hatch.build.hooks.custom]
 path = "hatch_build.py"
@@ -61,6 +62,11 @@ path = "hatch_build.py"
 
 [dependency-groups]
 dev = [
+    # node_service's tests import the node_service package, so its runtime
+    # dependencies must resolve in this env even though the burla wheel does
+    # not depend on them.
+    "aiodocker>=0.26.0,<0.27.0",
+    "nvidia-ml-py>=12.0.0",
     "anyscale>=0.26.82",
     "daft>=0.6.13",
     "delta-spark>=4.0.0",

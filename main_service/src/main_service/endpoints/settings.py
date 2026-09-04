@@ -11,6 +11,7 @@ from main_service import (
     IN_LOCAL_DEV_MODE,
     LOCAL_DEV_CONFIG,
     BURLA_BACKEND_URL,
+    resource_caps,
 )
 from main_service import history
 
@@ -31,6 +32,7 @@ def get_settings(request: Request):
     response = requests.get(url, headers={"Authorization": f"Bearer {CLUSTER_ID_TOKEN}"})
     response.raise_for_status()
     user_emails = [user["email"] for user in response.json()["authorized_users"]]
+    max_vcpus, max_gpus = resource_caps(config_dict)
     return {
         "containerImage": container.get("image", ""),
         "machineType": node.get("machine_type", ""),
@@ -38,6 +40,8 @@ def get_settings(request: Request):
         "machineQuantity": node.get("quantity", 1),
         "diskSize": node.get("disk_size_gb", 50),
         "inactivityTimeout": int(node.get("inactivity_shutdown_time_sec", 600) // 60),
+        "maxVcpus": max_vcpus,
+        "maxGpus": max_gpus,
         "users": user_emails,
         "burlaVersion": CURRENT_BURLA_VERSION,
         "googleCloudProjectId": PROJECT_ID,
@@ -78,6 +82,11 @@ async def update_settings(request: Request):
     )
     nodes[0]["containers"] = [container]
     config_dict["Nodes"] = nodes
+    max_vcpus, max_gpus = resource_caps(config_dict)
+    config_dict["max_vcpus"] = request_json.get("maxVcpus", max_vcpus)
+    # Merge per model so a partial update doesn't clear other models' caps.
+    max_gpus.update(request_json.get("maxGpus", {}))
+    config_dict["max_gpus"] = max_gpus
     history.save_cluster_config(config_dict)
 
     if IN_LOCAL_DEV_MODE:
@@ -88,6 +97,8 @@ async def update_settings(request: Request):
             "azure": "Standard_D2s_v6",
         }[CLOUD_PROVIDER]
         LOCAL_DEV_CONFIG["Nodes"][0]["quantity"] = 1
+        LOCAL_DEV_CONFIG["max_vcpus"] = config_dict["max_vcpus"]
+        LOCAL_DEV_CONFIG["max_gpus"] = config_dict["max_gpus"]
 
     email = request.session.get("X-User-Email")
     authorization = request.session.get("Authorization")

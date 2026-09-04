@@ -19,6 +19,7 @@ from main_service import (
     PROJECT_ID,
     cluster_state,
     history,
+    resource_caps,
 )
 from main_service.endpoints.cluster_lifecycle import (
     _get_cluster_config,
@@ -109,6 +110,8 @@ class SettingsPatch(BaseModel):
     region: str | None = None
     disk_gb: int | None = None
     inactivity_timeout_seconds: int | None = None
+    max_vcpus: int | None = None
+    max_gpus: dict[str, int] | None = None
 
 
 def _iso(timestamp) -> str | None:
@@ -801,23 +804,15 @@ def watch_jobs(parent_job_id: str | None = None):
     )
 
 
-# The head stamps ended_at on its ~1s state-push cadence, so a job's
-# sequential successor (which the client starts the moment results arrive)
-# can start slightly before the predecessor's recorded end. Starts inside
-# this window still count as "after".
-_ENDED_AT_STAMP_LAG_SECONDS = 1.5
-
-
-def _job_end(job: dict) -> float:
-    return job["ended_at"] if job["ended_at"] is not None else float("inf")
-
-
 def _stage_to_nodes(
     stage_jobs: list[dict], current_job_id: str, stage_index: int, prefix: str
 ) -> list[dict]:
     """One parallel stage as graph nodes, grouped by function name. Grouping
     keeps huge fan-outs readable: 1,000 parallel `train_model` jobs render as
     one node with a count."""
+    stage_jobs = sorted(
+        stage_jobs, key=lambda job: (job["parent_call_index"] or 0, job["job_id"])
+    )
     by_function: dict[str, list[dict]] = {}
     for job in stage_jobs:
         by_function.setdefault(job["function_name"], []).append(job)
@@ -865,7 +860,6 @@ def _stage_to_nodes(
                     group_path,
                 ),
                 "_member_jobs": jobs,
-                "_max_ended_at": max(_job_end(job) for job in jobs),
             }
         )
     return nodes
@@ -873,51 +867,37 @@ def _stage_to_nodes(
 
 def _structure_nodes(jobs: list[dict], current_job_id: str, prefix: str) -> list[dict]:
     """Graph nodes for one set of sibling jobs (jobs spawned from inside the
-    same enclosing job). The graph models data flow, not just parentage:
+    same enclosing job). The graph models the caller's happens-before order,
+    recorded by the client at call time (`parent_call_depth`), never inferred
+    from timestamps:
 
-    - Siblings that ran sequentially (each started after the previous stage
-      ended) are pipeline stages: each stage nests under the previous stage's
-      node, next to that node's own nested jobs.
-    - Siblings that overlapped in time are parallel branches, side by side.
+    - A sibling that started after another sibling returned in the same UDF
+      invocation sits one depth deeper: a pipeline stage, nested under the
+      previous stage's node.
+    - Siblings at the same depth (concurrent calls, or calls from different
+      invocations of the enclosing function) are parallel branches, side by
+      side. Jobs from before this field existed have no depth and land in
+      stage 0.
     """
     if not jobs:
         return []
-    jobs = sorted(
-        jobs,
-        key=lambda job: (
-            job["started_at"] is None,
-            job["started_at"] or 0,
-            job["job_id"],
-        ),
-    )
-    stages: list[list[dict]] = []
-    stage_end = 0.0
+    jobs_by_depth: dict[int, list[dict]] = {}
     for job in jobs:
-        sequential = (
-            job["started_at"] is not None
-            and job["started_at"] >= stage_end - _ENDED_AT_STAMP_LAG_SECONDS
-        )
-        if not stages or sequential:
-            stages.append([job])
-            stage_end = _job_end(job)
-        else:
-            stages[-1].append(job)
-            stage_end = max(stage_end, _job_end(job))
+        jobs_by_depth.setdefault(int(job["parent_call_depth"] or 0), []).append(job)
     stage_nodes = [
-        _stage_to_nodes(stage, current_job_id, index, prefix)
-        for index, stage in enumerate(stages)
+        _stage_to_nodes(jobs_by_depth[depth], current_job_id, index, prefix)
+        for index, depth in enumerate(sorted(jobs_by_depth))
     ]
-    # Each later stage consumed the previous stage's output, so it nests under
-    # the previous stage's last-finishing node. Prepended so the pipeline
+    # Each later stage began only after the previous stage returned, so it
+    # nests under the previous stage's largest node. Prepended so the pipeline
     # trunk renders as a straight line with nested branches hanging off it.
     for prev_nodes, next_nodes in zip(stage_nodes, stage_nodes[1:]):
-        anchor = max(prev_nodes, key=lambda node: node["_max_ended_at"])
+        anchor = max(
+            prev_nodes, key=lambda node: (node["job_count"], node["function_name"])
+        )
         for node in next_nodes:
             node["chained"] = True
         anchor["children"][:0] = next_nodes
-    for nodes in stage_nodes:
-        for node in nodes:
-            del node["_max_ended_at"]
     return stage_nodes[0]
 
 
@@ -1506,6 +1486,7 @@ def _settings_dto() -> dict:
     config = LOCAL_DEV_CONFIG if IN_LOCAL_DEV_MODE else history.get_cluster_config()
     node = config["Nodes"][0]
     container = node["containers"][0]
+    max_vcpus, max_gpus = resource_caps(config)
     return {
         "image": container.get("image", ""),
         "machine_type": node.get("machine_type"),
@@ -1515,6 +1496,8 @@ def _settings_dto() -> dict:
         "inactivity_timeout_seconds": node.get(
             "inactivity_shutdown_time_sec", 600
         ),
+        "max_vcpus": max_vcpus,
+        "max_gpus": max_gpus,
         "burla_version": CURRENT_BURLA_VERSION,
         "project_id": PROJECT_ID,
         "cloud_account_name": CLOUD_ACCOUNT_NAME,
@@ -1549,7 +1532,7 @@ def _validate_settings(updates: dict):
             "INVALID_ARGUMENT",
             "region is not available for this machine type.",
         )
-    for field in ("quantity", "disk_gb", "inactivity_timeout_seconds"):
+    for field in ("quantity", "disk_gb", "inactivity_timeout_seconds", "max_vcpus"):
         if field not in updates:
             continue
         constraint = options["constraints"][field]
@@ -1560,6 +1543,23 @@ def _validate_settings(updates: dict):
                 f"{field} must be between {constraint['minimum']} and "
                 f"{constraint['maximum']}.",
             )
+    if "max_gpus" in updates:
+        constraint = options["constraints"]["max_gpus"]
+        for model, cap in updates["max_gpus"].items():
+            if model not in options["gpu_models"]:
+                raise ManagementAPIError(
+                    422,
+                    "INVALID_ARGUMENT",
+                    f"Unknown GPU model {model!r}; valid models on this cloud: "
+                    f"{', '.join(options['gpu_models'])}.",
+                )
+            if not constraint["minimum"] <= cap <= constraint["maximum"]:
+                raise ManagementAPIError(
+                    422,
+                    "INVALID_ARGUMENT",
+                    f"max_gpus values must be between {constraint['minimum']} "
+                    f"and {constraint['maximum']}.",
+                )
     target_image = updates.get("image", current["image"])
     if (
         machine_spec(target_machine)["gpus"]
@@ -1597,6 +1597,13 @@ def update_settings(patch: SettingsPatch):
     for field, config_field in mapping.items():
         if field in updates:
             node[config_field] = updates[field]
+    if "max_vcpus" in updates:
+        config["max_vcpus"] = updates["max_vcpus"]
+    if "max_gpus" in updates:
+        # Merge per model so capping A100 doesn't clear the H100 cap.
+        merged = config.get("max_gpus", {})
+        merged.update(updates["max_gpus"])
+        config["max_gpus"] = merged
     history.save_cluster_config(config)
     if IN_LOCAL_DEV_MODE:
         LOCAL_DEV_CONFIG.update(config)

@@ -2,6 +2,7 @@ import asyncio
 import base64
 import io
 import json
+import os
 import pickle
 import ssl
 import sys
@@ -78,13 +79,48 @@ _FUNCTION_PAYLOAD_MAGIC = b"BURLA_FUNCTION_V2\0"
 _FUNCTION_PICKLE_LOCK = Lock()
 
 
-def _parent_job_id() -> Optional[str]:
+# Happens-before bookkeeping for nested rpm calls, keyed by the run id the
+# worker assigns to each UDF invocation. Recording each call's position in
+# its run's call order lets the dashboard draw sequential calls as pipeline
+# stages and concurrent calls as parallel branches without inferring either
+# from timestamps.
+_NESTED_RUN_LOCK = Lock()
+_NESTED_RUNS: dict = {}
+
+
+def _nested_call_context() -> dict:
     """Inside a worker, the node writes the enclosing job's id into the
-    credentials file it mounts at CONFIG_PATH; nested rpm calls report it so
-    the dashboard can nest their jobs under the enclosing one."""
+    credentials file it mounts at CONFIG_PATH, and the worker assigns each
+    UDF invocation a fresh run id (env var). Nested rpm calls report both,
+    plus this call's index and depth in the run's happens-before order:
+    depth = one past the deepest call that had already returned when this
+    call started, so calls that overlap in the caller share a depth."""
     if not _in_burla_worker():
-        return None
-    return json.loads(CONFIG_PATH.read_text()).get("current_job_id")
+        return {}
+    run_id = os.environ.get("BURLA_PARENT_RUN_ID")
+    with _NESTED_RUN_LOCK:
+        run = _NESTED_RUNS.setdefault(
+            run_id, {"next_index": 0, "depths": {}, "returned": set()}
+        )
+        call_index = run["next_index"]
+        run["next_index"] += 1
+        returned_depths = [run["depths"][i] for i in run["returned"]]
+        depth = max(returned_depths) + 1 if returned_depths else 0
+        run["depths"][call_index] = depth
+    return {
+        "parent_job_id": json.loads(CONFIG_PATH.read_text()).get("current_job_id"),
+        "parent_run_id": run_id,
+        "parent_call_index": call_index,
+        "parent_call_depth": depth,
+    }
+
+
+def _mark_nested_call_returned(context: dict):
+    if not context:
+        return
+    with _NESTED_RUN_LOCK:
+        run = _NESTED_RUNS[context["parent_run_id"]]
+        run["returned"].add(context["parent_call_index"])
 
 
 def _pickle_function(function_: Callable, local_module_names: set) -> bytes:
@@ -264,6 +300,7 @@ async def _execute_job(
     func_gpu: Optional[FuncGpu],
     region: Optional[str],
     disk_gb: Optional[int],
+    nested_call_context: dict,
     session: aiohttp.ClientSession,
     session_stack: AsyncExitStack,
     reporter: RemoteParallelMapReporter,
@@ -323,7 +360,10 @@ async def _execute_job(
         "func_gpu": func_gpu,
         "region": region,
         "disk_gb": disk_gb,
-        "parent_job_id": _parent_job_id(),
+        "parent_job_id": nested_call_context.get("parent_job_id"),
+        "parent_run_id": nested_call_context.get("parent_run_id"),
+        "parent_call_index": nested_call_context.get("parent_call_index"),
+        "parent_call_depth": nested_call_context.get("parent_call_depth"),
     }
     # On 503 nodes_busy, show boot progress via the polling loop then try
     # once more. Any other known error surfaces as its domain exception
@@ -463,6 +503,7 @@ async def _execute_job(
                 new_node.late_join = True
                 nodes.append(new_node)
                 new_node_inputs = []
+                node_inputs[name] = new_node_inputs
                 input_lists.append(new_node_inputs)
                 # Appended in lockstep so the main loop's zip(node_tasks,
                 # nodes) failure scan stays aligned.
@@ -520,6 +561,29 @@ async def _execute_job(
             )
             if booting_nodes_all_failed and no_node_started_work:
                 raise await _nodes_failed_to_boot_exception(booting_nodes)
+
+            # A node removed before draining its pre-split input share (e.g.
+            # a failed assignment) leaves those inputs client-side where
+            # nothing would ever upload them, hanging the job at N-minus-its
+            # -share results. Hand them to a node still on the job. The
+            # identity check skips the shared-single-list layout, where a
+            # removed node strands nothing.
+            for node in nodes:
+                if node.state != "REMOVED":
+                    continue
+                leftover = node_inputs.get(node.instance_name)
+                if not leftover:
+                    continue
+                recipients = [
+                    n
+                    for n in nodes
+                    if n.state in ("READY", "RUNNING")
+                    and node_inputs.get(n.instance_name) is not leftover
+                ]
+                if not recipients:
+                    continue
+                node_inputs[recipients[0].instance_name].extend(leftover)
+                leftover.clear()
 
             for task, node in zip(node_tasks, nodes):
                 exception = task.exception() if task.done() else None
@@ -786,6 +850,9 @@ def remote_parallel_map(
     max_parallelism = max_parallelism if max_parallelism else len(inputs)
     uid = base64.urlsafe_b64encode(uuid4().bytes[:9]).decode()
     job_id = f"{function_.__name__}-{uid}"
+    # Allocated at call time (not when the job thread runs) so the recorded
+    # call order is the caller's program order.
+    nested_call_context = _nested_call_context()
 
     return_queue = Queue()
     failure_diagnostics = []
@@ -834,6 +901,7 @@ def remote_parallel_map(
                     func_gpu=func_gpu,
                     region=region,
                     disk_gb=disk_gb,
+                    nested_call_context=nested_call_context,
                 )
             )
         except BaseException:
@@ -925,6 +993,9 @@ def remote_parallel_map(
             _handle_failure(e)
             raise
         finally:
+            # This call has now returned (or raised) in the caller's program
+            # order: later calls in the same run start one depth deeper.
+            _mark_nested_call_returned(nested_call_context)
             restore_signal_handlers(original_signal_handlers)
 
     outputs = _output_generator()

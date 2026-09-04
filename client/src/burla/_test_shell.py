@@ -88,7 +88,6 @@ def test_shell():
         "BURLA_RELAY_HOST",
         "BURLA_RELAY_SERVER_ADDR",
         "BURLA_RELAY_SERVER_PORT",
-        "BURLA_NODE_SOURCE_REF",
         "BURLA_CLUSTER_DASHBOARD_URL",
         # This shell already runs on its own interpreter via PATH. Leaking the
         # variable would make any nested `uv run` (e.g. `make local-dev`) rebuild

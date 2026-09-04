@@ -84,6 +84,72 @@ async def debug_log(event: str, **fields):
         print(f"failed to forward debug log to head: {e}")
 
 
+RELAY_PROXY_LOG_CHECK_INTERVAL_SEC = 60
+# Excerpts are for post-mortems, not monitoring; one event per window is
+# plenty and keeps a flapping tunnel from flooding the table.
+RELAY_PROXY_ERROR_EVENT_MIN_GAP_SEC = 600
+RELAY_PROXY_LOG_TAIL_LINES = 40
+RELAY_PROXY_EXCERPT_MAX_BYTES = 6_000
+FRPC_JOURNAL_CURSOR_PATH = "/var/run/burla-frpc-journal.cursor"
+
+
+async def _capture_command_output(*command: str) -> str:
+    process = await asyncio.create_subprocess_exec(
+        *command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    output, _ = await process.communicate()
+    return output.decode(errors="replace").strip()
+
+
+async def relay_proxy_diagnostics_loop():
+    """Post-mortem material for relay-layer failures (e.g. a 502 answering
+    job assignment): those hops fail outside node_service, so the frpc and
+    caddy logs are the only node-side evidence, and they die with the VM.
+    One snapshot at boot, then error-only excerpts, all shipped as
+    debug_log events, which users never see (the dashboard node view stays
+    high-level)."""
+    frpc_tail = await _capture_command_output(
+        *("journalctl", "-u", "burla-frpc", "--no-pager", "-o", "short-iso"),
+        *("-n", str(RELAY_PROXY_LOG_TAIL_LINES)),
+        f"--cursor-file={FRPC_JOURNAL_CURSOR_PATH}",
+    )
+    caddy_tail = await _capture_command_output(
+        *("docker", "logs", "--tail", str(RELAY_PROXY_LOG_TAIL_LINES)),
+        "burla-node-caddy",
+    )
+    await debug_log(
+        "relay_proxy_boot_snapshot",
+        frpc=frpc_tail[-RELAY_PROXY_EXCERPT_MAX_BYTES:],
+        caddy=caddy_tail[-RELAY_PROXY_EXCERPT_MAX_BYTES:],
+    )
+
+    last_error_event_at = 0.0
+    while True:
+        await asyncio.sleep(RELAY_PROXY_LOG_CHECK_INTERVAL_SEC)
+        new_output = await _capture_command_output(
+            *("journalctl", "-u", "burla-frpc", "--no-pager", "-o", "short-iso"),
+            f"--cursor-file={FRPC_JOURNAL_CURSOR_PATH}",
+        )
+        # frp marks log levels [W]/[E]; anything else is connection chatter.
+        error_lines = [
+            line
+            for line in new_output.splitlines()
+            if "[W]" in line or "[E]" in line
+        ]
+        if not error_lines:
+            continue
+        if time() - last_error_event_at < RELAY_PROXY_ERROR_EVENT_MIN_GAP_SEC:
+            continue
+        last_error_event_at = time()
+        excerpt = "\n".join(error_lines[-RELAY_PROXY_LOG_TAIL_LINES:])
+        await debug_log(
+            "relay_proxy_errors",
+            frpc=excerpt[-RELAY_PROXY_EXCERPT_MAX_BYTES:],
+        )
+
+
 class Logger:
     """Prints to stdout (journald / docker captures it) and forwards each line
     to the head so it shows in the dashboard's node-log view. Errors also go

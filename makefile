@@ -304,8 +304,8 @@ dev-clean:
 # nodes are real cloud VMs: EC2 in the Burla test AWS account by default, or
 # Azure VMs with BURLA_CLOUD=azure (uses your active `az` subscription).
 # Nodes reach this head through the relay, so many of these run at once on
-# one machine. Node VMs cannot see this working tree: they run this
-# checkout's branch, so push node_service changes before expecting them here.
+# one machine. Node VMs download this working tree from the head at boot,
+# uncommitted edits included, so nothing needs committing or pushing.
 remote-dev:
 	set -e; \
 	$(MAKE) -C main_service ensure-frontend; \

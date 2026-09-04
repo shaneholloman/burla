@@ -170,6 +170,30 @@ def _set_local_dev_node_quantity(quantity: int) -> None:
     resp.raise_for_status()
 
 
+def _set_node_quantity(quantity: int) -> None:
+    """Point the cluster's configured node count at `quantity` for the next
+    restart. local-dev pins the count at startup and resets it on every
+    settings write, so it has a test-only endpoint; any other dev head is
+    resized through the real settings endpoint, like the dashboard."""
+    if _head_in_local_dev_mode():
+        _set_local_dev_node_quantity(quantity)
+        return
+    import requests
+
+    headers = _request_headers()
+    resp = requests.get(f"{DASHBOARD_URL}/v1/settings", headers=headers, timeout=10)
+    resp.raise_for_status()
+    settings = resp.json()
+    settings["machineQuantity"] = quantity
+    # The whole payload (users included) goes back unchanged so the write is
+    # a pure quantity change: the endpoint syncs the cluster's user list to
+    # whatever list the payload carries.
+    resp = requests.post(
+        f"{DASHBOARD_URL}/v1/settings", json=settings, headers=headers, timeout=30
+    )
+    resp.raise_for_status()
+
+
 def _wait_for_ready_nodes(n: int, timeout: float) -> list[dict[str, Any]]:
     deadline = time.time() + timeout
     saw_booting_node = False
@@ -399,9 +423,8 @@ def clean_local_dev_cluster_before_cluster_tests(request):
 @pytest.fixture
 def cluster_with_n_nodes(local_dev_cluster):
     """Grow this checkout's cluster to `n` READY nodes for tests that need
-    more than one, then put it back. local-dev fixes the node count at head
-    startup and resets it on every settings write, so the head exposes a
-    test-only knob for this."""
+    more than one, then put it back. Works in both dev modes; on remote-dev
+    every added node is a real VM, so the resize costs a couple of minutes."""
     original_quantity = None
 
     def _ensure(n: int) -> list[dict[str, Any]]:
@@ -410,15 +433,8 @@ def cluster_with_n_nodes(local_dev_cluster):
         if len(state["ready_nodes"]) >= n:
             return state["ready_nodes"]
 
-        if not _head_in_local_dev_mode():
-            pytest.fail(
-                f"this test needs {n} READY nodes but the cluster has "
-                f"{len(state['ready_nodes'])}; raise machineQuantity in settings "
-                "and restart the cluster."
-            )
-
         original_quantity = _expected_ready_node_count(_request_headers())
-        _set_local_dev_node_quantity(n)
+        _set_node_quantity(n)
         for attempt in range(2):
             old_names = _restart_cluster(_request_headers())
             _wait_for_replacement_nodes(old_names, CLEAN_CLUSTER_TIMEOUT_SEC)
@@ -431,7 +447,7 @@ def cluster_with_n_nodes(local_dev_cluster):
     yield _ensure
 
     if original_quantity is not None:
-        _set_local_dev_node_quantity(original_quantity)
+        _set_node_quantity(original_quantity)
         old_names = _restart_cluster(_request_headers())
         _wait_for_replacement_nodes(old_names, CLEAN_CLUSTER_TIMEOUT_SEC)
         _wait_for_ready_nodes(original_quantity, CLEAN_CLUSTER_TIMEOUT_SEC)

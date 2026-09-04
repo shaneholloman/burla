@@ -17,8 +17,14 @@ import time
 import pytest
 
 # 1000 inputs are only a scale test where the cluster can actually scale;
-# local-dev tops out at 4 worker slots.
-pytestmark = [pytest.mark.e2e, pytest.mark.slow, pytest.mark.remote_dev]
+# local-dev tops out at 4 worker slots. The timeout covers the job plus the
+# grow-node cleanup wait at the end.
+pytestmark = [
+    pytest.mark.e2e,
+    pytest.mark.slow,
+    pytest.mark.remote_dev,
+    pytest.mark.timeout(600),
+]
 
 N_INPUTS = 1000
 
@@ -31,6 +37,10 @@ def test_thousand_input_rpm_completes_with_grow(
 ):
     source = "def test_function(x):\n    return x * 3\n"
 
+    ready_before = {
+        node["instance_name"]
+        for node in main_http_client.get("/v1/cluster/state").json()["ready_nodes"]
+    }
     before = time.time()
     result = rpm_subprocess(
         source, list(range(N_INPUTS)), timeout_seconds=300, grow=True
@@ -73,4 +83,24 @@ def test_thousand_input_rpm_completes_with_grow(
     # the counters track real work.
     assert total >= int(N_INPUTS * 0.99), (
         f"n_results {total} < 99% of n_inputs {N_INPUTS}"
+    )
+
+    # The job finishes long before the ~16 nodes its grow request booted, and
+    # those are deleted (mid-boot) once its scope ends. Returning while they
+    # are still BOOTING leaks them into the next test's readiness gate, which
+    # then pays for a full cluster restart.
+    def _cluster_back_to_baseline():
+        nodes = main_http_client.get("/v1/cluster/nodes").json()["nodes"]
+        active = [
+            node
+            for node in nodes
+            if node.get("status") in ("BOOTING", "READY", "RUNNING")
+        ]
+        all_ready = all(node.get("status") == "READY" for node in active)
+        return all_ready and {n["instance_name"] for n in active} == ready_before
+
+    wait_for_fixture(
+        _cluster_back_to_baseline,
+        timeout=300,
+        message="grow nodes were not deleted after the job finished",
     )

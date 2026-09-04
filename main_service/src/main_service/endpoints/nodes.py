@@ -9,6 +9,8 @@ cluster token. These replace every node -> Firestore write and watch:
 - POST /v1/nodes/{id}/metrics:batch per-second node and task resource samples.
 - POST /v1/nodes/{id}/self_delete node asks the head to delete its VM
                                  (inactivity shutdown, boot failure).
+- GET  /v1/node-source           tarball of this head's node/client/main
+                                 source, downloaded by every booting VM.
 - GET  /v1/jobs/{id}/peers       input-stealing ring (replaces the firestore
                                  neighbor query).
 - POST /v1/jobs/{id}/logs:batch  UDF log documents from JobLogWriter.
@@ -18,7 +20,7 @@ import asyncio
 from hmac import compare_digest
 from time import time
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from starlette.requests import ClientDisconnect
 from main_service.endpoints.cluster_lifecycle import (
     GROW_INACTIVITY_SHUTDOWN_TIME_SEC,
@@ -28,8 +30,9 @@ from main_service.endpoints.cluster_lifecycle import (
 )
 from main_service.helpers import Logger
 from main_service.node import Node
+from main_service.node_source import build_node_source_tarball
 from main_service.providers import get_provider
-from main_service.scaling import plan_grow_nodes, planned_cpu_count
+from main_service.scaling import plan_grow_nodes, planned_cpu_count, planned_gpu_count
 from main_service.transport_tls import cluster_ca_pem, node_auth_token, sign_node_csr
 
 from main_service import (
@@ -40,6 +43,7 @@ from main_service import (
     get_add_background_task_function,
     get_logger,
     history,
+    mint_controller,
     relay_fqdn,
 )
 
@@ -84,6 +88,8 @@ async def push_node_state(
             instance_name,
             current_num_results=progress.get("current_num_results"),
             client_contact_last_1s=progress.get("client_contact_last_1s"),
+            alive_workers=progress.get("alive_workers"),
+            busy_workers=progress.get("busy_workers"),
         )
 
     job_scope_id = merged.get("job_scope_id")
@@ -118,6 +124,12 @@ async def push_node_state(
         "reserved_for_job": merged.get("reserved_for_job"),
         "job": cluster_state.job_view(job_id) if job_id else None,
     }
+    if job_id:
+        # Rollback of an unproductive mint epoch: the controller hands back
+        # this node's share of the epoch's grants exactly once.
+        shed = mint_controller.take_shed(job_id, instance_name)
+        if shed:
+            response["shed_slots"] = shed
     if CLOUD_PROVIDER == "azure" and IN_CLIENT_HOSTED_MODE:
         from main_service.providers.azure import (
             DELETE_LEASE_REFRESH_SEC,
@@ -190,6 +202,12 @@ async def issue_node_certificate(instance_name: str, request: Request):
     return {"certificate": certificate, "cluster_ca": cluster_ca_pem()}
 
 
+@router.get("/v1/node-source")
+async def get_node_source():
+    tarball = await asyncio.to_thread(build_node_source_tarball)
+    return Response(content=tarball, media_type="application/gzip")
+
+
 @router.post("/v1/nodes/{instance_name}/self_delete")
 async def self_delete_node(
     instance_name: str,
@@ -215,6 +233,24 @@ async def get_job_peers(job_id: str):
     return cluster_state.peers_for_job(job_id)
 
 
+@router.post("/v1/jobs/{job_id}/mint")
+async def mint_slots(job_id: str, request: Request):
+    """A node with green machine gates and a backlog asks for extra slots.
+    Grants come out of the mint controller's current epoch allowance, so
+    job-wide growth only continues while measured goodput keeps paying for
+    it (see mint_controller.py). All machine-local policy (gates, damper,
+    batch sizing) stays on the node; it only asks after those pass."""
+    body = await request.json()
+    slots_requested = int(body["slots_requested"])
+    if slots_requested <= 0:
+        raise HTTPException(status_code=400, detail="slots_requested must be > 0")
+    job = cluster_state.get_job(job_id)
+    if job is None or job.get("status") != "RUNNING":
+        raise HTTPException(status_code=409, detail="job is not RUNNING")
+    granted = mint_controller.grant(job_id, body["requesting_node"], slots_requested)
+    return {"slots_granted": granted}
+
+
 @router.post("/v1/jobs/{job_id}/replacement_nodes")
 async def boot_replacement_nodes(
     job_id: str,
@@ -228,14 +264,17 @@ async def boot_replacement_nodes(
     plans machine types, enforces the job's grow-CPU budget, and boots. Slots
     are conserved - the caller gives up the slots this boots.
 
-    Body: {"requesting_node", "missing_slots", "request_id"}. Replaying the
-    same request_id returns the original plan instead of booting again, so a
-    node that never saw the response can retry safely.
+    Body: {"requesting_node", "missing_slots", "request_id", "slots_per_node"}.
+    Replaying the same request_id returns the original plan instead of booting
+    again, so a node that never saw the response can retry safely.
+    `slots_per_node` (optional) is the requester's measured capacity; when set,
+    replacements are the requester's machine type with that many slots each.
     """
     body = await request.json()
     requesting_node = body["requesting_node"]
     missing_slots = int(body["missing_slots"])
     request_id = body["request_id"]
+    slots_per_node = body.get("slots_per_node")
 
     if missing_slots <= 0:
         raise HTTPException(status_code=400, detail="missing_slots must be > 0")
@@ -265,10 +304,13 @@ async def boot_replacement_nodes(
         func_gpu=job.get("func_gpu"),
         config=config,
         max_additional_cpus=job.get("grow_cpus_remaining"),
+        max_additional_gpus=job.get("grow_gpus_remaining"),
+        slots_per_node=slots_per_node,
+        machine_type=cluster_state.get_node(requesting_node)["machine_type"],
     )
     if not planned:
         raise HTTPException(
-            status_code=409, detail="replacement refused: grow CPU budget exhausted"
+            status_code=409, detail="replacement refused: grow budget exhausted"
         )
 
     image = job.get("image")
@@ -291,6 +333,7 @@ async def boot_replacement_nodes(
         requesting_node,
         {"request_id": request_id, "booted": planned, "slots_booted": slots_booted},
         cpus_booted=planned_cpu_count(planned),
+        gpus_booted=planned_gpu_count(planned),
     )
     names = [p["instance_name"] for p in planned]
     logger.log(
@@ -313,6 +356,7 @@ async def boot_replacement_nodes(
                     "missing_slots": missing_slots,
                     "booted": planned,
                     "grow_cpus_remaining": updated_job.get("grow_cpus_remaining"),
+                    "grow_gpus_remaining": updated_job.get("grow_gpus_remaining"),
                 },
             }
         ],

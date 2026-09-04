@@ -73,6 +73,14 @@ async def push_state(
                 "job_id": SELF["current_job"],
                 "current_num_results": SELF["num_results_received"],
                 "client_contact_last_1s": SELF.get("client_contact_last_1s", True),
+                # The head's mint controller measures job-wide workers, so it
+                # needs each node's live count, not the assignment-time one.
+                # busy_workers lets it ignore pipeline-fill ramp when it
+                # estimates goodput noise (blocks only count at full busy).
+                "alive_workers": sum(
+                    1 for w in SELF["workers"] if not w.retired
+                ),
+                "busy_workers": SELF["current_parallelism"],
             }
         session = _get_session()
         url = f"{MAIN_SERVICE_URL}/v1/nodes/{INSTANCE_NAME}/state"
@@ -82,6 +90,15 @@ async def push_state(
             lease = view.get("delete_lease")
             if lease:
                 _install_delete_lease(lease)
+            shed = int(view.get("shed_slots") or 0)
+            if shed and SELF["current_job"]:
+                # Mint-epoch rollback: give back slots whose measured effect
+                # on job goodput was negative. Target drops now; the workers
+                # behind it retire as they go idle (see the shed consumers in
+                # job_watcher.py and worker_client._process_inputs).
+                applied = min(shed, SELF["target_parallelism"])
+                SELF["target_parallelism"] -= applied
+                SELF["shed_slots_pending"] += applied
             return view
 
 
@@ -150,19 +167,37 @@ async def get_peers(job_id: str) -> dict:
         return await response.json()
 
 
+async def request_mint(job_id: str, slots_requested: int) -> int:
+    """Ask the head's mint controller for extra slots. Returns the granted
+    count (0 while the job's growth is frozen or the epoch allowance is
+    spent). A response lost in transit leaks the granted slots from the
+    epoch's allowance; the controller's verdict measures realized growth, so
+    the leak only shrinks that epoch, it can't corrupt state."""
+    session = _get_session()
+    url = f"{MAIN_SERVICE_URL}/v1/jobs/{job_id}/mint"
+    body = {"requesting_node": INSTANCE_NAME, "slots_requested": slots_requested}
+    async with session.post(url, json=body, headers=_HEADERS) as response:
+        response.raise_for_status()
+        return int((await response.json()).get("slots_granted") or 0)
+
+
 async def request_replacement_nodes(
-    job_id: str, missing_slots: int, request_id: str
+    job_id: str, missing_slots: int, request_id: str, slots_per_node: int | None
 ) -> dict:
     """Ask the head to boot machines covering slots this node permanently
     lost to pressure retirement. Returns {"booted": [...], "slots_booted"}.
     `request_id` makes retries after a lost response safe (the head replays
-    the original plan instead of booting again)."""
+    the original plan instead of booting again). `slots_per_node` is how many
+    workers this machine actually sustains; the head sizes the replacements'
+    targets to it so they start at that parallelism instead of repeating the
+    shed storm this node just went through."""
     session = _get_session()
     url = f"{MAIN_SERVICE_URL}/v1/jobs/{job_id}/replacement_nodes"
     body = {
         "requesting_node": INSTANCE_NAME,
         "missing_slots": missing_slots,
         "request_id": request_id,
+        "slots_per_node": slots_per_node,
     }
     async with session.post(url, json=body, headers=_HEADERS) as response:
         response.raise_for_status()

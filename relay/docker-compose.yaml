@@ -15,9 +15,19 @@ services:
     depends_on:
       - auth-plugin
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 100m
+        max-file: "10"
 
   auth-plugin:
     build: .
     environment:
       BURLA_BACKEND_URL: ${BURLA_BACKEND_URL:-https://backend.burla.dev}
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 100m
+        max-file: "10"
